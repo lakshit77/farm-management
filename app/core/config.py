@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     WELLINGTON_USERNAME: str = ""
     WELLINGTON_PASSWORD: str = ""
 
+    # API key for n8n / external callers (Bearer token). If empty, key check is skipped.
+    API_SECRET_KEY: str = ""
+
     # Logging (optional)
     LOG_DIR: str = "logs"
     LOG_LEVEL: str = "INFO"
