@@ -7,6 +7,7 @@ from fastapi.openapi.utils import get_openapi
 
 from app.api.v1.router import api_router
 from app.core.api_key_middleware import ApiKeyMiddleware
+from app.core.config import get_settings
 from app.core.logging_config import setup_logging
 
 
@@ -26,12 +27,32 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS: with allow_credentials=True, origins cannot be "*". Use explicit list.
+_default_cors_origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "http://127.0.0.1:5175",
+]
+
+
+def _get_cors_origins() -> list[str]:
+    """Return list of allowed CORS origins from settings or default dev list."""
+    settings = get_settings()
+    if settings.CORS_ORIGINS.strip():
+        return [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
+    return _default_cors_origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 app.add_middleware(ApiKeyMiddleware)
 

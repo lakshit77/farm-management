@@ -31,6 +31,10 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Let CORS preflight through without auth (browser does not send Authorization on OPTIONS).
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         path = request.scope.get("path", "")
         if _path_exempt(path):
             return await call_next(request)

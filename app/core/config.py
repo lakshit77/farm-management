@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # API key for n8n / external callers (Bearer token). If empty, key check is skipped.
     API_SECRET_KEY: str = ""
 
+    # CORS: comma-separated origins (e.g. http://localhost:5175). When empty, uses default localhost dev origins.
+    CORS_ORIGINS: str = ""
+
     # Logging (optional)
     LOG_DIR: str = "logs"
     LOG_LEVEL: str = "INFO"
