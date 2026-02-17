@@ -1,0 +1,74 @@
+---
+description: Python and FastAPI coding standards—functional style, RORO, error handling, async, and performance
+globs: **/*.py
+alwaysApply: false
+---
+
+# Python & FastAPI Guidelines
+
+## Principles
+
+- **Concise, technical responses** with accurate Python examples.
+- **Functional, declarative** style; avoid classes where a function suffices.
+- **Iterate and modularize**; avoid duplication.
+- **Naming**: descriptive names with auxiliary verbs (e.g. `is_active`, `has_permission`).
+- **Paths**: lowercase with underscores (e.g. `routers/user_routes.py`).
+- **RORO**: Receive an Object, Return an Object—prefer single payload in/out.
+
+## Python & FastAPI
+
+- Use `def` for pure/sync code, `async def` for I/O (DB, HTTP, etc.).
+- **Type hints** on all function signatures; prefer **Pydantic models** over raw dicts for validation.
+- **Structure**: exported router, sub-routes, utilities, static content, types (models, schemas).
+- One-line conditionals: `if condition: do_something()` (no unnecessary blocks).
+- Use guard clauses and early returns; keep the happy path last.
+
+## Error Handling & Validation
+
+- Handle errors and edge cases **at the start** of functions.
+- **Early returns** for invalid/error states; avoid deep nesting.
+- Prefer **if-return**; avoid unnecessary `else` after returns.
+- Use **guard clauses** for preconditions and invalid states.
+- Log errors with context; surface **user-friendly messages**.
+- Use **HTTPException** for expected API errors; use custom error types or factories for consistency.
+
+```python
+# ✅ Guard clause and early return
+async def get_user(user_id: int) -> User:
+    if user_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    user = await db.fetch_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+```
+
+## FastAPI-Specific
+
+- **Input/response**: Pydantic `BaseModel` for validation and response schemas.
+- **Routes**: declarative definitions with clear return type annotations.
+- **Lifespan**: prefer **lifespan context managers** over `@app.on_event("startup")` / `@app.on_event("shutdown")`.
+- **Middleware**: use for logging, error monitoring, and performance (e.g. timing).
+- **Dependency injection**: use FastAPI’s system for shared state and resources.
+- **Blocking**: avoid in routes; use async for DB and external APIs.
+
+## Performance
+
+- Prefer **async** for all DB and external API calls (e.g. asyncpg, aiomysql).
+- Use **caching** (Redis or in-memory) for static or hot data.
+- Rely on **Pydantic** for efficient serialization/deserialization.
+- Use **lazy loading** or pagination for large datasets and heavy responses.
+
+## Dependencies (when relevant)
+
+- FastAPI, Pydantic v2.
+- Async DB: asyncpg or aiomysql.
+- SQLAlchemy 2.0 if using ORM.
+
+## Conventions Summary
+
+1. Use **dependency injection** for state and shared resources.
+2. Optimize for **API metrics** (latency, throughput).
+3. Keep routes **non-blocking**: async DB and external calls; clear, readable structure.
+
+Refer to FastAPI docs for Data Models, Path Operations, and Middleware when implementing.

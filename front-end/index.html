@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Schedule – Showground Live</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 1rem; background: #f5f5f5; }
+    h1 { margin: 0 0 0.5rem 0; font-size: 1.25rem; }
+    .toolbar { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap; }
+    .toolbar input[type=date] { padding: 0.35rem 0.5rem; }
+    .toolbar button { padding: 0.35rem 0.75rem; cursor: pointer; }
+    .error { color: #c00; margin-top: 0.5rem; }
+    .loading { color: #666; }
+    .event-block { margin-bottom: 1.5rem; background: #fff; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow: hidden; }
+    .event-title { padding: 0.6rem 1rem; background: #e8e8e8; font-weight: 600; font-size: 1rem; }
+    .class-block { border-bottom: 1px solid #eee; }
+    .class-block:last-child { border-bottom: none; }
+    .row { display: grid; grid-template-columns: 6rem 1fr 1fr 2fr 6rem; gap: 0.5rem 1rem; padding: 0.5rem 1rem; align-items: center; cursor: pointer; border-bottom: 1px solid #f0f0f0; font-size: 0.9rem; }
+    .row:hover { background: #f8f8f8; }
+    .row.head { font-weight: 600; background: #f0f0f0; cursor: default; }
+    .row.head:hover { background: #f0f0f0; }
+    .expandable { display: none; padding: 1rem; background: #fafafa; border-top: 1px solid #eee; font-size: 0.85rem; }
+    .expandable.open { display: block; }
+    .expandable h4 { margin: 0 0 0.5rem 0; font-size: 0.9rem; color: #333; }
+    .expandable section { margin-bottom: 1rem; }
+    .expandable section:last-child { margin-bottom: 0; }
+    .expandable dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1.5rem; }
+    .expandable dt { color: #666; font-weight: 500; }
+    .expandable dd { margin: 0; }
+    .show-name { color: #555; font-size: 0.9rem; margin-bottom: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Schedule</h1>
+  <div class="show-name" id="showName"></div>
+  <div class="toolbar">
+    <label>Date <input type="date" id="dateInput"></label>
+    <button type="button" id="btnLoad">Load</button>
+  </div>
+  <div id="message" class="loading">Loading…</div>
+  <div id="content"></div>
+
+  <script>
+    (function () {
+      var API_BASE = 'http://localhost:8000'; // Backend API; use '' if same origin
+      var dateInput = document.getElementById('dateInput');
+      var btnLoad = document.getElementById('btnLoad');
+      var message = document.getElementById('message');
+      var content = document.getElementById('content');
+      var showNameEl = document.getElementById('showName');
+
+      function todayStr() {
+        var d = new Date();
+        var y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0');
+        return y + '-' + m + '-' + day;
+      }
+
+      dateInput.value = todayStr();
+
+      function renderOrder(entry) {
+        if (entry.order_of_go != null && entry.order_total != null) return entry.order_of_go + ' of ' + entry.order_total;
+        return 'unk';
+      }
+
+      function renderExpandable(entry, cls) {
+        var horse = entry.horse || {};
+        var rider = entry.rider || {};
+        var parts = [];
+        parts.push('<section><h4>Class</h4><dl>');
+        parts.push('<dt>Name</dt><dd>' + escapeHtml(cls.name) + '</dd>');
+        if (cls.class_number) { parts.push('<dt>Class #</dt><dd>' + escapeHtml(cls.class_number) + '</dd>'); }
+        if (cls.sponsor) { parts.push('<dt>Sponsor</dt><dd>' + escapeHtml(cls.sponsor) + '</dd>'); }
+        if (cls.prize_money != null) { parts.push('<dt>Prize money</dt><dd>' + escapeHtml(String(cls.prize_money)) + '</dd>'); }
+        if (cls.class_type) { parts.push('<dt>Type</dt><dd>' + escapeHtml(cls.class_type) + '</dd>'); }
+        parts.push('</dl></section>');
+
+        parts.push('<section><h4>Horse</h4><dl>');
+        parts.push('<dt>Name</dt><dd>' + escapeHtml(horse.name || '') + '</dd>');
+        parts.push('<dt>Status</dt><dd>' + escapeHtml(horse.status || '') + '</dd>');
+        parts.push('</dl></section>');
+
+        parts.push('<section><h4>Rider</h4><dl>');
+        parts.push('<dt>Name</dt><dd>' + escapeHtml(rider.name || '') + '</dd>');
+        parts.push('</dl></section>');
+
+        parts.push('<section><h4>Entry / status (from backend)</h4><dl>');
+        parts.push('<dt>Order</dt><dd>' + renderOrder(entry) + '</dd>');
+        parts.push('<dt>Entry status</dt><dd>' + escapeHtml(entry.status || '') + '</dd>');
+        parts.push('<dt>Gone in</dt><dd>' + (entry.gone_in ? 'Yes' : 'No') + '</dd>');
+        parts.push('<dt>Scratch trip</dt><dd>' + (entry.scratch_trip ? 'Yes' : 'No') + '</dd>');
+        if (entry.class_status) { parts.push('<dt>Class status</dt><dd>' + escapeHtml(entry.class_status) + '</dd>'); }
+        if (entry.ring_status) { parts.push('<dt>Ring status</dt><dd>' + escapeHtml(entry.ring_status) + '</dd>'); }
+        if (entry.estimated_start) { parts.push('<dt>Estimated start</dt><dd>' + escapeHtml(entry.estimated_start) + '</dd>'); }
+        if (entry.actual_start) { parts.push('<dt>Actual start</dt><dd>' + escapeHtml(entry.actual_start) + '</dd>'); }
+        if (entry.scheduled_date) { parts.push('<dt>Scheduled date</dt><dd>' + escapeHtml(entry.scheduled_date) + '</dd>'); }
+        if (entry.total_trips != null) { parts.push('<dt>Total trips</dt><dd>' + entry.total_trips + '</dd>'); }
+        if (entry.completed_trips != null) { parts.push('<dt>Completed trips</dt><dd>' + entry.completed_trips + '</dd>'); }
+        if (entry.remaining_trips != null) { parts.push('<dt>Remaining trips</dt><dd>' + entry.remaining_trips + '</dd>'); }
+        if (entry.placing != null) { parts.push('<dt>Placing</dt><dd>' + entry.placing + '</dd>'); }
+        if (entry.points_earned != null) { parts.push('<dt>Points earned</dt><dd>' + entry.points_earned + '</dd>'); }
+        if (entry.total_prize_money != null) { parts.push('<dt>Total prize money</dt><dd>' + entry.total_prize_money + '</dd>'); }
+        if (entry.back_number) { parts.push('<dt>Back number</dt><dd>' + escapeHtml(entry.back_number) + '</dd>'); }
+        if (entry.faults_one != null) { parts.push('<dt>Faults (Rd 1)</dt><dd>' + entry.faults_one + '</dd>'); }
+        if (entry.time_one != null) { parts.push('<dt>Time (Rd 1)</dt><dd>' + entry.time_one + '</dd>'); }
+        if (entry.disqualify_status_one) { parts.push('<dt>Disqualify (Rd 1)</dt><dd>' + escapeHtml(entry.disqualify_status_one) + '</dd>'); }
+        if (entry.faults_two != null) { parts.push('<dt>Faults (Rd 2)</dt><dd>' + entry.faults_two + '</dd>'); }
+        if (entry.time_two != null) { parts.push('<dt>Time (Rd 2)</dt><dd>' + entry.time_two + '</dd>'); }
+        if (entry.disqualify_status_two) { parts.push('<dt>Disqualify (Rd 2)</dt><dd>' + escapeHtml(entry.disqualify_status_two) + '</dd>'); }
+        if (entry.score1 != null) { parts.push('<dt>Score 1</dt><dd>' + entry.score1 + '</dd>'); }
+        if (entry.score2 != null) { parts.push('<dt>Score 2</dt><dd>' + entry.score2 + '</dd>'); }
+        if (entry.score3 != null) { parts.push('<dt>Score 3</dt><dd>' + entry.score3 + '</dd>'); }
+        if (entry.score4 != null) { parts.push('<dt>Score 4</dt><dd>' + entry.score4 + '</dd>'); }
+        if (entry.score5 != null) { parts.push('<dt>Score 5</dt><dd>' + entry.score5 + '</dd>'); }
+        if (entry.score6 != null) { parts.push('<dt>Score 6</dt><dd>' + entry.score6 + '</dd>'); }
+        parts.push('</dl></section>');
+
+        return parts.join('');
+      }
+
+      function escapeHtml(s) {
+        var div = document.createElement('div');
+        div.textContent = s;
+        return div.innerHTML;
+      }
+
+      function toggleExpand(rowEl, expandEl) {
+        var isOpen = expandEl.classList.contains('open');
+        expandEl.classList.toggle('open', !isOpen);
+      }
+
+      function render(data) {
+        if (!data.events || data.events.length === 0) {
+          content.innerHTML = '<p>No schedule for this date.</p>';
+          return;
+        }
+        showNameEl.textContent = data.show_name ? 'Show: ' + data.show_name : '';
+        var html = '';
+        data.events.forEach(function (ev) {
+          html += '<div class="event-block">';
+          html += '<div class="event-title">' + escapeHtml(ev.name) + (ev.ring_number != null ? ' (Ring ' + ev.ring_number + ')' : '') + '</div>';
+          ev.classes.forEach(function (cls) {
+            html += '<div class="class-block">';
+            html += '<div class="row head"><span>Class time</span><span>Horse</span><span>Rider</span><span>Class name</span><span>Order</span></div>';
+            cls.entries.forEach(function (entry) {
+              var horseName = (entry.horse && entry.horse.name) ? entry.horse.name : '';
+              var riderName = (entry.rider && entry.rider.name) ? entry.rider.name : '';
+              var classLabel = (cls.class_number ? cls.class_number + ' - ' : '') + (cls.prize_money != null ? '$' + cls.prize_money + ' ' : '') + cls.name;
+              var timeStr = entry.estimated_start || entry.actual_start || '—';
+              var entryId = 'exp-' + entry.id;
+              html += '<div class="row" data-expand="' + entryId + '">';
+              html += '<span>' + escapeHtml(String(timeStr)) + '</span>';
+              html += '<span>' + escapeHtml(horseName) + '</span>';
+              html += '<span>' + escapeHtml(riderName) + '</span>';
+              html += '<span>' + escapeHtml(classLabel) + '</span>';
+              html += '<span>' + renderOrder(entry) + '</span>';
+              html += '</div>';
+              html += '<div class="expandable" id="' + entryId + '">' + renderExpandable(entry, cls) + '</div>';
+            });
+            html += '</div>';
+          });
+          html += '</div>';
+        });
+        content.innerHTML = html;
+
+        content.querySelectorAll('.row:not(.head)').forEach(function (row) {
+          var id = row.getAttribute('data-expand');
+          if (!id) return;
+          var expandEl = document.getElementById(id);
+          if (!expandEl) return;
+          row.addEventListener('click', function () { toggleExpand(row, expandEl); });
+        });
+      }
+
+      function load() {
+        var date = dateInput.value || todayStr();
+        message.textContent = 'Loading…';
+        message.className = 'loading';
+        content.innerHTML = '';
+        var url = (API_BASE || '') + '/api/v1/schedule/view?date=' + encodeURIComponent(date);
+        fetch(url)
+          .then(function (res) { return res.json(); })
+          .then(function (json) {
+            if (json.status !== 1) {
+              message.textContent = 'Error: ' + (json.message || 'Unknown error');
+              message.className = 'error';
+              return;
+            }
+            message.textContent = '';
+            message.className = '';
+            render(json.data);
+          })
+          .catch(function (err) {
+            message.textContent = 'Request failed: ' + err.message;
+            message.className = 'error';
+          });
+      }
+
+      btnLoad.addEventListener('click', load);
+      load();
+    })();
+  </script>
+</body>
+</html>

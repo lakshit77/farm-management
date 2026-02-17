@@ -1,0 +1,23 @@
+# Showground Live Monitoring API - Docker Compose for EC2 / local
+# Usage: docker compose up -d
+# API: http://localhost:8000/api/v1 (or http://<EC2_PUBLIC_IP>:8000/api/v1)
+
+services:
+  api:
+    build: .
+    image: showgroundlive-api:latest
+    container_name: showgroundlive-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    # Optional: override or add env vars (e.g. for EC2)
+    # environment:
+    #   - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/hello/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
