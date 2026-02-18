@@ -104,3 +104,4 @@ class ScheduleViewData(BaseModel):
     show_name: Optional[str] = None
     show_id: Optional[str] = None
     events: List[EventView] = []
+    inactive_entries: List[EntryView] = []

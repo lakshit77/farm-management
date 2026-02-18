@@ -25,6 +25,7 @@ class EntryStatus(str, Enum):
     ACTIVE = "active"
     COMPLETED = "completed"
     SCRATCHED = "scratched"
+    INACTIVE = "inactive"  # Entry in "my entries" but not in any class (not participating)
 
 
 # -----------------------------------------------------------------------------

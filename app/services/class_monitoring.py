@@ -143,10 +143,46 @@ async def get_active_classes_and_entries(
 
 
 def _parse_time(s: Optional[str]) -> Optional[str]:
-    """Normalize API time string for comparison (e.g. '07:15:00' -> keep as-is)."""
+    """Return API time string as-is (e.g. '07:15:00'). Used before normalizing for storage."""
     if s is None or not isinstance(s, str):
         return None
     return s.strip() or None
+
+
+def _time_to_datetime_str(
+    time_str: Optional[str],
+    scheduled_date: Optional[date],
+) -> Optional[str]:
+    """
+    Normalize time string to 'YYYY-MM-DD HH:MM:SS' for consistent storage and display.
+
+    API may return time-only ('10:05:00'); daily schedule stores full datetime.
+    When we have scheduled_date, combine so frontend always receives same format.
+    """
+    if not time_str or not isinstance(time_str, str):
+        return None
+    time_str = time_str.strip()
+    if not time_str:
+        return None
+    if scheduled_date is None:
+        return time_str if " " in time_str else None
+    if " " in time_str:
+        return time_str
+    parts = time_str.split(":")
+    try:
+        h = int(parts[0]) if len(parts) > 0 else 0
+        m = int(parts[1]) if len(parts) > 1 else 0
+        s = int(parts[2]) if len(parts) > 2 else 0
+    except (ValueError, TypeError):
+        return None
+    dt = datetime(
+        scheduled_date.year,
+        scheduled_date.month,
+        scheduled_date.day,
+        h, m, s,
+        tzinfo=timezone.utc,
+    )
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _normalize_time_for_comparison(s: Optional[str]) -> Optional[str]:
@@ -382,6 +418,9 @@ async def _process_one_class_with_data(
     api_status = _safe_str(crd.get("status"))
     api_estimated = _parse_time(crd.get("estimated_time"))
     api_actual = _parse_time(crd.get("actual_time"))
+    scheduled_date = first.scheduled_date
+    normalized_estimated = _time_to_datetime_str(api_estimated, scheduled_date)
+    normalized_actual = _time_to_datetime_str(api_actual, scheduled_date)
     api_total_trips = _safe_int(crd.get("total_trips"))
     api_completed_trips = _safe_int(crd.get("completed_trips"))
     api_remaining_trips = _safe_int(crd.get("remaining_trips"))
@@ -416,12 +455,12 @@ async def _process_one_class_with_data(
                 )
 
     norm_old_time = _normalize_time_for_comparison(first.estimated_start)
-    norm_new_time = _normalize_time_for_comparison(api_estimated)
-    if api_estimated is not None and norm_old_time != norm_new_time:
+    norm_new_time = _normalize_time_for_comparison(normalized_estimated or api_estimated)
+    if (normalized_estimated or api_estimated) is not None and norm_old_time != norm_new_time:
         ch = {
             "type": NotificationType.TIME_CHANGE.value,
             "old": first.estimated_start or "—",
-            "new": api_estimated,
+            "new": normalized_estimated or api_estimated,
             "class_name": class_name,
         }
         changes.append(ch)
@@ -558,8 +597,8 @@ async def _process_one_class_with_data(
 
         # ---------- Update entry (Step 5) ----------
         entry.class_status = api_status
-        entry.estimated_start = api_estimated
-        entry.actual_start = api_actual
+        entry.estimated_start = normalized_estimated or api_estimated
+        entry.actual_start = normalized_actual or api_actual
         entry.total_trips = api_total_trips
         entry.completed_trips = api_completed_trips
         entry.remaining_trips = api_remaining_trips

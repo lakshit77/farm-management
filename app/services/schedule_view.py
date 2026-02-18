@@ -54,6 +54,40 @@ def _date_str(d: Optional[date]) -> Optional[str]:
     return d.isoformat() if d else None
 
 
+def _normalize_time_for_display(
+    time_val: Optional[str],
+    scheduled_date: Optional[date],
+) -> Optional[str]:
+    """
+    Return time in consistent 'YYYY-MM-DD HH:MM:SS' for API response.
+
+    DB may have time-only ('10:05:00') from class monitoring or full datetime from
+    daily schedule. Normalize so frontend always receives same format.
+    """
+    if not time_val or not isinstance(time_val, str):
+        return None
+    s = time_val.strip()
+    if not s or scheduled_date is None:
+        return s if s else None
+    if " " in s:
+        return s
+    parts = s.split(":")
+    try:
+        h = int(parts[0]) if len(parts) > 0 else 0
+        m = int(parts[1]) if len(parts) > 1 else 0
+        sec = int(parts[2]) if len(parts) > 2 else 0
+    except (ValueError, TypeError):
+        return s
+    dt = datetime(
+        scheduled_date.year,
+        scheduled_date.month,
+        scheduled_date.day,
+        h, m, sec,
+        tzinfo=timezone.utc,
+    )
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 async def get_schedule_view(
     session: AsyncSession,
     view_date: date,
@@ -94,6 +128,7 @@ async def get_schedule_view(
     show_name: Optional[str] = None
     show_id: Optional[str] = None
 
+    inactive_entries_list: List[Entry] = []
     for e in entries:
         event = e.event
         show_class = e.show_class
@@ -101,6 +136,7 @@ async def get_schedule_view(
             show_name = e.show.name
             show_id = _uuid_str(e.show.id)
         if event is None or show_class is None:
+            inactive_entries_list.append(e)
             continue
         eid = _uuid_str(event.id)
         cid_key = _uuid_str(show_class.id)
@@ -158,11 +194,14 @@ async def get_schedule_view(
 
     events_out.sort(key=lambda ev: (ev.ring_number is None, ev.ring_number or 0, ev.name))
 
+    inactive_views = [_entry_to_view(e) for e in inactive_entries_list]
+
     return ScheduleViewData(
         date=view_date.isoformat(),
         show_name=show_name,
         show_id=show_id,
         events=events_out,
+        inactive_entries=inactive_views,
     )
 
 
@@ -170,6 +209,9 @@ def _entry_to_view(e: Entry) -> EntryView:
     """Build EntryView from Entry ORM with horse and rider."""
     horse = e.horse
     rider = e.rider
+    sdate = e.scheduled_date
+    estimated_start = _normalize_time_for_display(e.estimated_start, sdate)
+    actual_start = _normalize_time_for_display(e.actual_start, sdate)
     return EntryView(
         id=_uuid_str(e.id),
         horse=HorseView(
@@ -184,9 +226,9 @@ def _entry_to_view(e: Entry) -> EntryView:
         status=e.status or EntryStatus.ACTIVE.value,
         scratch_trip=e.scratch_trip or False,
         gone_in=e.gone_in or False,
-        estimated_start=e.estimated_start,
-        actual_start=e.actual_start,
-        scheduled_date=_date_str(e.scheduled_date),
+        estimated_start=estimated_start,
+        actual_start=actual_start,
+        scheduled_date=_date_str(sdate),
         class_status=e.class_status,
         ring_status=e.ring_status,
         total_trips=e.total_trips,

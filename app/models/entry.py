@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    and_,
     select,
     text,
     tuple_,
@@ -159,39 +160,73 @@ async def bulk_upsert_entries(
     Bulk insert/update entries. Each dict has horse_id, rider_id, show_id, event_id,
     class_id, api_entry_id, api_horse_id, api_rider_id, api_class_id, api_ring_id,
     api_trainer_id, back_number, scheduled_date, estimated_start (and optional status/class_status).
-    ON CONFLICT (horse_id, show_id, api_class_id) DO UPDATE SET rider_id, estimated_start, updated_at.
+
+    Rows with api_class_id set are upserted on (horse_id, show_id, api_class_id).
+    Rows with api_class_id null (no-class / inactive entries) are upserted on (horse_id, show_id).
 
     Returns:
-        (inserted_count, updated_count). Counts rows newly inserted vs rows updated.
+        (inserted_count, updated_count). Combined counts across both passes.
     """
     if not rows:
         return 0, 0
-    key_tuples = [
-        (r["horse_id"], r["show_id"], r.get("api_class_id"))
-        for r in rows
-        if r.get("api_class_id") is not None
-    ]
-    if not key_tuples:
-        existing_count = 0
-    else:
+
+    with_class = [r for r in rows if r.get("api_class_id") is not None]
+    no_class = [r for r in rows if r.get("api_class_id") is None]
+
+    inserted_total = 0
+    updated_total = 0
+
+    if with_class:
+        key_tuples = [
+            (r["horse_id"], r["show_id"], r["api_class_id"])
+            for r in with_class
+        ]
         result = await session.execute(
             select(Entry.id).where(
                 tuple_(Entry.horse_id, Entry.show_id, Entry.api_class_id).in_(key_tuples)
             )
         )
         existing_count = len(result.all())
-    inserted = len(rows) - existing_count
-    updated = existing_count
+        inserted_total += len(with_class) - existing_count
+        updated_total += existing_count
 
-    stmt = insert(Entry.__table__).values(rows)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["horse_id", "show_id", "api_class_id"],
-        index_where=text("api_class_id IS NOT NULL"),  # matches partial unique index idx_entries_unique
-        set_={
-            "rider_id": stmt.excluded.rider_id,
-            "estimated_start": stmt.excluded.estimated_start,
-            "updated_at": datetime.now(timezone.utc),
-        },
-    )
-    await session.execute(stmt)
-    return inserted, updated
+        stmt = insert(Entry.__table__).values(with_class)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["horse_id", "show_id", "api_class_id"],
+            index_where=text("api_class_id IS NOT NULL"),
+            set_={
+                "rider_id": stmt.excluded.rider_id,
+                "estimated_start": stmt.excluded.estimated_start,
+                "updated_at": datetime.now(timezone.utc),
+            },
+        )
+        await session.execute(stmt)
+
+    if no_class:
+        key_tuples_no = [(r["horse_id"], r["show_id"]) for r in no_class]
+        result_no = await session.execute(
+            select(Entry.id).where(
+                and_(
+                    tuple_(Entry.horse_id, Entry.show_id).in_(key_tuples_no),
+                    Entry.api_class_id.is_(None),
+                )
+            )
+        )
+        existing_no_count = len(result_no.all())
+        inserted_total += len(no_class) - existing_no_count
+        updated_total += existing_no_count
+
+        stmt_no = insert(Entry.__table__).values(no_class)
+        stmt_no = stmt_no.on_conflict_do_update(
+            index_elements=["horse_id", "show_id"],
+            index_where=text("api_class_id IS NULL"),
+            set_={
+                "rider_id": stmt_no.excluded.rider_id,
+                "status": stmt_no.excluded.status,
+                "scheduled_date": stmt_no.excluded.scheduled_date,
+                "updated_at": datetime.now(timezone.utc),
+            },
+        )
+        await session.execute(stmt_no)
+
+    return inserted_total, updated_total

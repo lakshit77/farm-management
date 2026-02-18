@@ -465,6 +465,7 @@ def build_entry_rows_and_collect_entities(
     show_uuid: Any,
     ring_number_to_event_id: Dict[int, Any],
     api_class_id_to_class_id: Dict[int, Any],
+    sync_date: Optional[date] = None,
 ) -> Tuple[List[Dict[str, Any]], Set[str], Set[str], List[Tuple[str, str]]]:
     """
     From entry details, build DB entry rows (with _horse_name / _rider_name placeholders) and collect unique horses, riders, and (time, ring_name) for summary.
@@ -475,6 +476,7 @@ def build_entry_rows_and_collect_entities(
         - show_uuid: Show UUID.
         - ring_number_to_event_id: Map from ring number to event UUID.
         - api_class_id_to_class_id: Map from API class id to class UUID.
+        - sync_date: Optional date for the show day; used as scheduled_date for entries with no class.
 
     **Output (response):**
         - entry_rows: List of dicts suitable for bulk_upsert_entries; each has _horse_name and _rider_name (to be resolved to UUIDs later).
@@ -482,7 +484,7 @@ def build_entry_rows_and_collect_entities(
         - rider_names: Set of rider names seen.
         - time_ring_list: List of (estimated_start_utc_str, ring_name) for first/last class summary.
 
-    **What it does:** Iterates entry_details and each entry's classes; builds one row per (entry, class); fills show_id, event_id, class_id, api_* fields, scheduled_date, estimated_start (UTC); collects horse/rider names and (time, ring_name).
+    **What it does:** Iterates entry_details and each entry's classes; builds one row per (entry, class); for entries with no classes, builds one row with status INACTIVE and event_id/class_id/api_class_id null. Collects horse/rider names and (time, ring_name).
     """
     horse_names: Set[str] = set()
     rider_names: Set[str] = set()
@@ -510,6 +512,12 @@ def build_entry_rows_and_collect_entities(
             if rn:
                 rider_names.add(rn)
         classes_list = ed.get("classes") or []
+        default_rider = (
+            (entry_riders[0].get("rider_name") or "") if entry_riders else ""
+        )
+        api_rider_id_first = (
+            entry_riders[0].get("rider_id") if entry_riders else None
+        )
         for cl in classes_list:
             rn = (cl.get("rider_name") or "").strip()
             if rn:
@@ -533,9 +541,6 @@ def build_entry_rows_and_collect_entities(
                 ring_number_to_event_id.get(ring_num) if ring_num is not None else None
             )
             sdate = _parse_date(scheduled_date_str)
-            default_rider = (
-                (entry_riders[0].get("rider_name") or "") if entry_riders else ""
-            )
             entry_rows.append({
                 "horse_id": None,
                 "rider_id": None,
@@ -555,6 +560,28 @@ def build_entry_rows_and_collect_entities(
                 "class_status": None,
                 "_horse_name": horse_name,
                 "_rider_name": rn or default_rider,
+            })
+        # If this entry has no classes, add one row with status INACTIVE so the horse appears in entries table
+        if not classes_list and horse_name:
+            entry_rows.append({
+                "horse_id": None,
+                "rider_id": None,
+                "show_id": show_uuid,
+                "event_id": None,
+                "class_id": None,
+                "api_entry_id": api_entry_id,
+                "api_horse_id": api_horse_id,
+                "api_rider_id": api_rider_id_first,
+                "api_class_id": None,
+                "api_ring_id": None,
+                "api_trainer_id": api_trainer_id,
+                "back_number": back_number,
+                "scheduled_date": sync_date,
+                "estimated_start": None,
+                "status": EntryStatus.INACTIVE.value,
+                "class_status": None,
+                "_horse_name": horse_name,
+                "_rider_name": default_rider,
             })
 
     return entry_rows, horse_names, rider_names, time_ring_list
@@ -802,6 +829,7 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                 show_uuid,
                 ring_number_to_event_id,
                 api_class_id_to_class_id,
+                sync_date=_sync_date,
             )
             entry_rows_built = len(entry_rows)
             print("[Flow 1] Entry rows built | horses=%s riders=%s rows=%s" % (len(horse_names), len(rider_names), entry_rows_built))
