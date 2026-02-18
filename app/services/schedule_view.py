@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.constants import CUSTOMER_ID, FARM_NAME
+from app.core.enums import EntryStatus
 from app.models.entry import Entry
 from app.models.event import Event
 from app.models.farm import get_farm_by_name_and_customer
@@ -174,13 +175,13 @@ def _entry_to_view(e: Entry) -> EntryView:
         horse=HorseView(
             id=_uuid_str(horse.id) if horse else "",
             name=horse.name if horse else "",
-            status=horse.status if horse else "active",
+            status=horse.status if horse else EntryStatus.ACTIVE.value,
         ),
         rider=RiderView(id=_uuid_str(rider.id), name=rider.name) if rider else None,
         back_number=e.back_number,
         order_of_go=e.order_of_go,
         order_total=e.order_total,
-        status=e.status or "active",
+        status=e.status or EntryStatus.ACTIVE.value,
         scratch_trip=e.scratch_trip or False,
         gone_in=e.gone_in or False,
         estimated_start=e.estimated_start,

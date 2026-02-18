@@ -5,6 +5,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
+from app.core.enums import EntryStatus
+
 
 class HorseView(BaseModel):
     """Horse details for schedule view."""
@@ -38,7 +40,7 @@ class EntryView(BaseModel):
     back_number: Optional[str] = None
     order_of_go: Optional[int] = None
     order_total: Optional[int] = None
-    status: str = "active"
+    status: str = EntryStatus.ACTIVE.value
     scratch_trip: bool = False
     gone_in: bool = False
 

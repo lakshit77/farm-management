@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.core.enums import EntryStatus
 from app.models.base import ts_created, ts_updated, uuid_pk
 
 
@@ -29,7 +30,7 @@ class Horse(Base):
         nullable=False,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default=EntryStatus.ACTIVE.value, nullable=False)
     metadata_: Mapped[Optional[dict]] = mapped_column(
         "metadata",
         JSONB,

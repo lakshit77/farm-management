@@ -20,6 +20,12 @@ from sqlalchemy.orm import selectinload
 
 from app.core.constants import CUSTOMER_ID
 from app.core.database import AsyncSessionLocal
+from app.core.enums import (
+    ClassStatus,
+    EntryStatus,
+    NotificationSource,
+    NotificationType,
+)
 from app.models.entry import Entry
 from app.models.show import Show
 from app.services.notification_log import log_notification
@@ -96,7 +102,7 @@ async def get_active_classes_and_entries(
                 Show.farm_id == farm_id,
                 Entry.scheduled_date == today,
                 Entry.api_class_id.isnot(None),
-                (Entry.class_status.is_(None) | (Entry.class_status != "Completed")),
+                (Entry.class_status.is_(None) | (Entry.class_status != ClassStatus.COMPLETED.value)),
             )
         )
         .options(
@@ -168,7 +174,7 @@ def _format_alert_status_change(
     class_name = change.get("class_name") or "Unknown Class"
     new_status = change.get("new") or ""
 
-    if new_status == "Completed":
+    if new_status == ClassStatus.COMPLETED.value:
         # Our Results: horse — Place #n, $prize
         lines = ["🏁 Class Completed", "", f"📋 {class_name}", f"📍 {ring_name}", "", "Our Results:"]
         entry_id_to_trip = {t.get("entry_id"): t for t in trips if t.get("entry_id")}
@@ -188,7 +194,7 @@ def _format_alert_status_change(
         return "\n".join(lines)
 
     # Class Started: only for Underway / In Progress (not for "Not Started")
-    if new_status in ("Underway", "In Progress"):
+    if new_status in (ClassStatus.UNDERWAY.value, ClassStatus.IN_PROGRESS.value):
         horse_list = []
         order_list = []
         entry_id_to_trip = {t.get("entry_id"): t for t in trips if t.get("entry_id")}
@@ -295,10 +301,10 @@ def _trip_for_entry(trips: List[Dict], api_entry_id: Optional[int]) -> Optional[
 def _entry_status(scratch_trip: bool, gone_in: bool) -> str:
     """Derived status: scratched > completed > active."""
     if scratch_trip:
-        return "scratched"
+        return EntryStatus.SCRATCHED.value
     if gone_in:
-        return "completed"
-    return "active"
+        return EntryStatus.COMPLETED.value
+    return EntryStatus.ACTIVE.value
 
 
 def _safe_decimal(v: Any) -> Optional[Decimal]:
@@ -386,24 +392,24 @@ async def _process_one_class_with_data(
     # ---------- Class-level changes ----------
     if api_status != first.class_status:
         # Don't emit STATUS_CHANGE when new status is "Not Started" (incl. null -> "Not Started")
-        if api_status == "Not Started":
+        if api_status == ClassStatus.NOT_STARTED.value:
             pass
         else:
             ch = {
-                "type": "STATUS_CHANGE",
+                "type": NotificationType.STATUS_CHANGE.value,
                 "old": first.class_status,
                 "new": api_status,
                 "class_name": class_name,
             }
             changes.append(ch)
             msg = _format_alert_status_change(ch, entries, trips, ring_name)
-            alerts.append({"type": "STATUS_CHANGE", "message": msg})
+            alerts.append({"type": NotificationType.STATUS_CHANGE.value, "message": msg})
             if farm_id is not None:
                 await log_notification(
                     session,
                     farm_id=farm_id,
-                    source="class_monitoring",
-                    notification_type="STATUS_CHANGE",
+                    source=NotificationSource.CLASS_MONITORING.value,
+                    notification_type=NotificationType.STATUS_CHANGE.value,
                     message=msg,
                     payload=ch,
                     entry_id=first.id,
@@ -413,7 +419,7 @@ async def _process_one_class_with_data(
     norm_new_time = _normalize_time_for_comparison(api_estimated)
     if api_estimated is not None and norm_old_time != norm_new_time:
         ch = {
-            "type": "TIME_CHANGE",
+            "type": NotificationType.TIME_CHANGE.value,
             "old": first.estimated_start or "—",
             "new": api_estimated,
             "class_name": class_name,
@@ -421,15 +427,15 @@ async def _process_one_class_with_data(
         changes.append(ch)
         time_msg = _format_alert_time_change(ch, ring_name)
         alerts.append({
-            "type": "TIME_CHANGE",
+            "type": NotificationType.TIME_CHANGE.value,
             "message": time_msg,
         })
         if farm_id is not None:
             await log_notification(
                 session,
                 farm_id=farm_id,
-                source="class_monitoring",
-                notification_type="TIME_CHANGE",
+                source=NotificationSource.CLASS_MONITORING.value,
+                notification_type=NotificationType.TIME_CHANGE.value,
                 message=time_msg,
                 payload=ch,
                 entry_id=first.id,
@@ -437,7 +443,7 @@ async def _process_one_class_with_data(
 
     if api_completed_trips is not None and api_completed_trips != first.completed_trips:
         ch = {
-            "type": "PROGRESS_UPDATE",
+            "type": NotificationType.PROGRESS_UPDATE.value,
             "completed": api_completed_trips,
             "total": api_total_trips or 0,
             "class_name": class_name,
@@ -445,15 +451,15 @@ async def _process_one_class_with_data(
         changes.append(ch)
         progress_msg = _format_alert_progress(ch, ring_name)
         alerts.append({
-            "type": "PROGRESS_UPDATE",
+            "type": NotificationType.PROGRESS_UPDATE.value,
             "message": progress_msg,
         })
         if farm_id is not None:
             await log_notification(
                 session,
                 farm_id=farm_id,
-                source="class_monitoring",
-                notification_type="PROGRESS_UPDATE",
+                source=NotificationSource.CLASS_MONITORING.value,
+                notification_type=NotificationType.PROGRESS_UPDATE.value,
                 message=progress_msg,
                 payload=ch,
                 entry_id=first.id,
@@ -475,7 +481,7 @@ async def _process_one_class_with_data(
         # Result posted
         if placing is not None and entry.placing != placing and 0 < placing < UNPLACED_PLACING:
             ch = {
-                "type": "RESULT",
+                "type": NotificationType.RESULT.value,
                 "horse": horse_name,
                 "placing": placing,
                 "prize_money": prize,
@@ -483,13 +489,13 @@ async def _process_one_class_with_data(
             }
             changes.append(ch)
             result_msg = _format_alert_result(ch)
-            alerts.append({"type": "RESULT", "message": result_msg})
+            alerts.append({"type": NotificationType.RESULT.value, "message": result_msg})
             if farm_id is not None:
                 await log_notification(
                     session,
                     farm_id=farm_id,
-                    source="class_monitoring",
-                    notification_type="RESULT",
+                    source=NotificationSource.CLASS_MONITORING.value,
+                    notification_type=NotificationType.RESULT.value,
                     message=result_msg,
                     payload=ch,
                     entry_id=entry.id,
@@ -498,7 +504,7 @@ async def _process_one_class_with_data(
         # Horse completed trip
         if gone_in and not entry.gone_in:
             ch = {
-                "type": "HORSE_COMPLETED",
+                "type": NotificationType.HORSE_COMPLETED.value,
                 "horse": horse_name,
                 "horse_id": str(entry.horse_id),
                 "class_name": class_name,
@@ -508,15 +514,15 @@ async def _process_one_class_with_data(
             time_one = trip.get("time_one")
             horse_completed_msg = _format_alert_horse_completed(ch, faults=faults, time_s=time_one)
             alerts.append({
-                "type": "HORSE_COMPLETED",
+                "type": NotificationType.HORSE_COMPLETED.value,
                 "message": horse_completed_msg,
             })
             if farm_id is not None:
                 await log_notification(
                     session,
                     farm_id=farm_id,
-                    source="class_monitoring",
-                    notification_type="HORSE_COMPLETED",
+                    source=NotificationSource.CLASS_MONITORING.value,
+                    notification_type=NotificationType.HORSE_COMPLETED.value,
                     message=horse_completed_msg,
                     payload=ch,
                     entry_id=entry.id,
@@ -532,19 +538,19 @@ async def _process_one_class_with_data(
         # Horse scratched
         if scratch_trip and not entry.scratch_trip:
             ch = {
-                "type": "SCRATCHED",
+                "type": NotificationType.SCRATCHED.value,
                 "horse": horse_name,
                 "class_name": class_name,
             }
             changes.append(ch)
             scratched_msg = _format_alert_scratched(ch)
-            alerts.append({"type": "SCRATCHED", "message": scratched_msg})
+            alerts.append({"type": NotificationType.SCRATCHED.value, "message": scratched_msg})
             if farm_id is not None:
                 await log_notification(
                     session,
                     farm_id=farm_id,
-                    source="class_monitoring",
-                    notification_type="SCRATCHED",
+                    source=NotificationSource.CLASS_MONITORING.value,
+                    notification_type=NotificationType.SCRATCHED.value,
                     message=scratched_msg,
                     payload=ch,
                     entry_id=entry.id,

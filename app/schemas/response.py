@@ -4,6 +4,8 @@ from typing import Any, Generic, Optional, TypeVar
 
 from pydantic import BaseModel
 
+from app.core.enums import ApiResponseMessage
+
 T = TypeVar("T")
 
 
@@ -21,7 +23,9 @@ class ApiResponse(BaseModel, Generic[T]):
     data: Optional[T] = None
 
 
-def success_response(data: Any = None, message: str = "success") -> ApiResponse[Any]:
+def success_response(
+    data: Any = None, message: str = ApiResponseMessage.SUCCESS.value
+) -> ApiResponse[Any]:
     """Build a successful API response (status=1)."""
     return ApiResponse(status=1, message=message, data=data)
 

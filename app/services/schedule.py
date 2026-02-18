@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import CUSTOMER_ID, FARM_NAME
 from app.core.database import AsyncSessionLocal
+from app.core.enums import EntryStatus, ScheduleTaskResult, ScheduleTriggerType
 from app.models.entry import bulk_upsert_entries
 from app.models.event import bulk_upsert_events, get_events_by_farm_for_rings
 from app.models.farm import Farm, create_farm, get_farm_by_name_and_customer
@@ -550,7 +551,7 @@ def build_entry_rows_and_collect_entities(
                 "back_number": back_number,
                 "scheduled_date": sdate,
                 "estimated_start": estimated_start,
-                "status": "active",
+                "status": EntryStatus.ACTIVE.value,
                 "class_status": None,
                 "_horse_name": horse_name,
                 "_rider_name": rn or default_rider,
@@ -882,8 +883,8 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                 len(horse_names),
             )
             return {
-                "task": "completed",
-                "trigger": "daily",
+                "task": ScheduleTaskResult.COMPLETED.value,
+                "trigger": ScheduleTriggerType.DAILY.value,
                 "summary": summary,
             }
         except Exception as exc:

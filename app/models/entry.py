@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.core.enums import EntryStatus
 from app.models.base import ts_created, ts_updated, uuid_pk
 
 
@@ -74,7 +75,7 @@ class Entry(Base):
     order_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # Status
-    status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default=EntryStatus.ACTIVE.value, nullable=False)
     scratch_trip: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     gone_in: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
