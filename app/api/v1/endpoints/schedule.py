@@ -6,10 +6,12 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_session
+from app.schemas.notification_log import NotificationLogItem, NotificationLogListData
 from app.schemas.response import ApiResponse, success_response
 from app.schemas.schedule_view import ScheduleViewData
 from app.services.class_monitoring import run_class_monitoring
-from app.services.schedule import resolve_sync_date, run_daily_schedule
+from app.services.notification_log import get_recent_notifications
+from app.services.schedule import ensure_farm_and_token, resolve_sync_date, run_daily_schedule
 from app.services.schedule_view import get_schedule_view
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
@@ -60,4 +62,33 @@ async def schedule_view(
     """
     _, view_date = resolve_sync_date(date)
     data = await get_schedule_view(session, view_date)
+    return success_response(data=data)
+
+
+@router.get(
+    "/notifications",
+    response_model=ApiResponse[NotificationLogListData],
+    summary="Recent notification log",
+    description="Returns recent notification log entries for the current farm. Optional filters: source, notification_type, limit.",
+)
+async def list_notifications(
+    limit: int = Query(50, ge=1, le=500, description="Max number of notifications to return."),
+    source: Optional[str] = Query(None, description="Filter by source (e.g. class_monitoring)."),
+    notification_type: Optional[str] = Query(None, description="Filter by type (e.g. STATUS_CHANGE)."),
+    session: AsyncSession = Depends(get_async_session),
+) -> ApiResponse[NotificationLogListData]:
+    """
+    List recent notifications for the current farm. Farm is resolved via ensure_farm_and_token.
+    """
+    farm_id, _ = await ensure_farm_and_token(session)
+    rows = await get_recent_notifications(
+        session,
+        farm_id=farm_id,
+        limit=limit,
+        source=source,
+        notification_type=notification_type,
+    )
+    data = NotificationLogListData(
+        notifications=[NotificationLogItem.model_validate(r) for r in rows],
+    )
     return success_response(data=data)

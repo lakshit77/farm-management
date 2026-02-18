@@ -50,15 +50,22 @@ async def bulk_upsert_horses(
     session: AsyncSession,
     farm_id: uuid.UUID,
     names: List[str],
-) -> None:
-    """Bulk insert horses ON CONFLICT (farm_id, name) DO NOTHING."""
+) -> Tuple[int, int]:
+    """
+    Bulk insert horses ON CONFLICT (farm_id, name) DO NOTHING.
+
+    Returns:
+        (inserted_count, updated_count). updated_count is always 0 (DO NOTHING).
+    """
     if not names:
-        return
+        return 0, 0
     names = list(dict.fromkeys(names))  # unique order-preserving
     stmt = insert(Horse.__table__).values(
         [{"farm_id": farm_id, "name": name} for name in names]
-    ).on_conflict_do_nothing(index_elements=["farm_id", "name"])
-    await session.execute(stmt)
+    ).on_conflict_do_nothing(index_elements=["farm_id", "name"]).returning(Horse.id)
+    result = await session.execute(stmt)
+    inserted = len(result.all())
+    return inserted, 0
 
 
 async def get_horse_ids_by_names(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, select, text
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -57,26 +57,39 @@ async def upsert_show(
     name: str,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
-) -> uuid.UUID:
+) -> Tuple[uuid.UUID, int, int]:
     """
-    Insert or update show on (farm_id, api_show_id). Returns show id.
+    Inserts a new show in the `shows` table based on (farm_id, api_show_id).
+    If a show with the same (farm_id, api_show_id) exists, returns its UUID and (0, 1),
+    otherwise inserts a new show record and returns its UUID and (1, 0).
+
+    Args:
+        session: SQLAlchemy AsyncSession for DB access.
+        farm_id: UUID of the farm to which the show belongs.
+        api_show_id: External (Wellington API) show ID (unique per show).
+        name: Name of the show.
+        start_date: Start date of the show (optional).
+        end_date: End date of the show (optional).
+
+    Returns:
+        (show_uuid, inserted_count, updated_count). One of inserted_count or updated_count is 1.
     """
-    stmt = insert(Show.__table__).values(
+    stmt_select = select(Show.id).where(
+        Show.farm_id == farm_id,
+        Show.api_show_id == api_show_id,
+    )
+    result = await session.execute(stmt_select)
+    row = result.first()
+
+    if row:
+        return row[0], 0, 1
+    stmt_insert = insert(Show.__table__).values(
         farm_id=farm_id,
         api_show_id=api_show_id,
         name=name,
         start_date=start_date,
         end_date=end_date,
-    ).on_conflict_do_update(
-        index_elements=["farm_id", "api_show_id"],
-        index_where=text("api_show_id IS NOT NULL"),  # matches partial unique index idx_shows_farm_api
-        set_={
-            "name": name,
-            "start_date": start_date,
-            "end_date": end_date,
-            "updated_at": datetime.now(timezone.utc),
-        },
     ).returning(Show.__table__.c.id)
-    result = await session.execute(stmt)
-    row = result.one()
-    return row[0]
+    result = await session.execute(stmt_insert)
+    new_row = result.one()
+    return new_row[0], 1, 0

@@ -46,27 +46,28 @@ async def bulk_upsert_events(
     session: AsyncSession,
     farm_id: uuid.UUID,
     rows: List[Tuple[str, Optional[int]]],
-) -> None:
+) -> Tuple[int, int]:
     """
-    Bulk insert/update events. Each row is (name, ring_number).
-    Uses ON CONFLICT (farm_id, name). Caller can then select by farm_id to get id map.
+    Bulk insert events if not exists. Each row is (name, ring_number).
+    Uses ON CONFLICT (farm_id, name) DO NOTHING—so existing rows are not touched.
+
+    Returns:
+        (inserted_count, updated_count). updated_count is always 0 (DO NOTHING).
     """
     if not rows:
-        return
+        return 0, 0
     stmt = insert(Event.__table__).values(
         [
             {"farm_id": farm_id, "name": name, "ring_number": rn}
             for name, rn in rows
         ]
     )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["farm_id", "name"],
-        set_={
-            "ring_number": stmt.excluded.ring_number,
-            "updated_at": datetime.now(timezone.utc),
-        },
-    )
-    await session.execute(stmt)
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["farm_id", "name"]
+    ).returning(Event.id)
+    result = await session.execute(stmt)
+    inserted = len(result.all())
+    return inserted, 0
 
 
 async def get_events_by_farm_for_rings(

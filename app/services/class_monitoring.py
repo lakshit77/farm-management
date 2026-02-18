@@ -22,6 +22,7 @@ from app.core.constants import CUSTOMER_ID
 from app.core.database import AsyncSessionLocal
 from app.models.entry import Entry
 from app.models.show import Show
+from app.services.notification_log import log_notification
 from app.services.schedule import ensure_farm_and_token
 from app.services.wellington_client import WellingtonAPIError, get_class
 
@@ -142,6 +143,21 @@ def _parse_time(s: Optional[str]) -> Optional[str]:
     return s.strip() or None
 
 
+def _normalize_time_for_comparison(s: Optional[str]) -> Optional[str]:
+    """
+    Return time-only part (HH:MM:SS) for comparison.
+    DB may store 'YYYY-MM-DD HH:MM:SS'; API returns 'HH:MM:SS'. Normalizing avoids false TIME_CHANGE.
+    """
+    if s is None or not isinstance(s, str):
+        return None
+    s = s.strip()
+    if not s:
+        return None
+    if " " in s:
+        s = s.split()[-1]
+    return s if s else None
+
+
 def _format_alert_status_change(
     change: Dict[str, Any],
     our_entries: List[Any],
@@ -171,22 +187,28 @@ def _format_alert_status_change(
                 lines.append(f"  {horse_name}")
         return "\n".join(lines)
 
-    # Class Started
-    horse_list = []
-    order_list = []
-    entry_id_to_trip = {t.get("entry_id"): t for t in trips if t.get("entry_id")}
-    for e in our_entries:
-        horse_name = (e.horse.name if e.horse else None) or "Unknown"
-        horse_list.append(horse_name)
-        trip = entry_id_to_trip.get(e.api_entry_id) if e.api_entry_id else None
-        order_list.append(str(trip.get("order_of_go", "?")) if trip else "?")
-    return (
-        "🟢 Class Started\n\n"
-        f"📋 {class_name}\n"
-        f"📍 {ring_name}\n"
-        f"🐴 Our horses: {', '.join(horse_list)}\n"
-        f"#️⃣ Order: {', '.join(order_list)}"
-    )
+    # Class Started: only for Underway / In Progress (not for "Not Started")
+    if new_status in ("Underway", "In Progress"):
+        horse_list = []
+        order_list = []
+        entry_id_to_trip = {t.get("entry_id"): t for t in trips if t.get("entry_id")}
+        for e in our_entries:
+            horse_name = (e.horse.name if e.horse else None) or "Unknown"
+            horse_list.append(horse_name)
+            trip = entry_id_to_trip.get(e.api_entry_id) if e.api_entry_id else None
+            order_list.append(
+                str(trip.get("order_of_go")) if (trip and trip.get("order_of_go") is not None) else "unk"
+            )
+        return (
+            "🟢 Class Started\n\n"
+            f"📋 {class_name}\n"
+            f"📍 {ring_name}\n"
+            f"🐴 Our horses: {', '.join(horse_list)}\n"
+            f"#️⃣ Order: {', '.join(order_list)}"
+        )
+
+    # Fallback for any other status (e.g. unknown API value)
+    return f"Status: {new_status}\n\n📋 {class_name}\n📍 {ring_name}"
 
 
 def _format_alert_time_change(change: Dict[str, Any], ring_name: str) -> str:
@@ -345,8 +367,10 @@ async def _process_one_class_with_data(
     if not entries or class_data is None:
         return 0, [], []
 
-    class_name = (entries[0].show_class.name if entries[0].show_class else None) or "Unknown Class"
-    ring_name = (entries[0].event.name if entries[0].event else None) or "Unknown Ring"
+    first = entries[0]
+    farm_id = first.show.farm_id if first.show else None
+    class_name = (first.show_class.name if first.show_class else None) or "Unknown Class"
+    ring_name = (first.event.name if first.event else None) or "Unknown Ring"
     crd = class_data.get("class_related_data") or {}
     trips = class_data.get("trips") or []
     api_status = _safe_str(crd.get("status"))
@@ -359,32 +383,57 @@ async def _process_one_class_with_data(
     changes: List[Dict[str, Any]] = []
     alerts: List[Dict[str, str]] = []  # [{ "type": "...", "message": "..." }]
 
-    first = entries[0]
-
     # ---------- Class-level changes ----------
     if api_status != first.class_status:
-        ch = {
-            "type": "STATUS_CHANGE",
-            "old": first.class_status,
-            "new": api_status,
-            "class_name": class_name,
-        }
-        changes.append(ch)
-        msg = _format_alert_status_change(ch, entries, trips, ring_name)
-        alerts.append({"type": "STATUS_CHANGE", "message": msg})
+        # Don't emit STATUS_CHANGE when new status is "Not Started" (incl. null -> "Not Started")
+        if api_status == "Not Started":
+            pass
+        else:
+            ch = {
+                "type": "STATUS_CHANGE",
+                "old": first.class_status,
+                "new": api_status,
+                "class_name": class_name,
+            }
+            changes.append(ch)
+            msg = _format_alert_status_change(ch, entries, trips, ring_name)
+            alerts.append({"type": "STATUS_CHANGE", "message": msg})
+            if farm_id is not None:
+                await log_notification(
+                    session,
+                    farm_id=farm_id,
+                    source="class_monitoring",
+                    notification_type="STATUS_CHANGE",
+                    message=msg,
+                    payload=ch,
+                    entry_id=first.id,
+                )
 
-    if api_estimated is not None and api_estimated != first.estimated_start:
+    norm_old_time = _normalize_time_for_comparison(first.estimated_start)
+    norm_new_time = _normalize_time_for_comparison(api_estimated)
+    if api_estimated is not None and norm_old_time != norm_new_time:
         ch = {
             "type": "TIME_CHANGE",
-            "old": first.estimated_start,
+            "old": first.estimated_start or "—",
             "new": api_estimated,
             "class_name": class_name,
         }
         changes.append(ch)
+        time_msg = _format_alert_time_change(ch, ring_name)
         alerts.append({
             "type": "TIME_CHANGE",
-            "message": _format_alert_time_change(ch, ring_name),
+            "message": time_msg,
         })
+        if farm_id is not None:
+            await log_notification(
+                session,
+                farm_id=farm_id,
+                source="class_monitoring",
+                notification_type="TIME_CHANGE",
+                message=time_msg,
+                payload=ch,
+                entry_id=first.id,
+            )
 
     if api_completed_trips is not None and api_completed_trips != first.completed_trips:
         ch = {
@@ -394,10 +443,21 @@ async def _process_one_class_with_data(
             "class_name": class_name,
         }
         changes.append(ch)
+        progress_msg = _format_alert_progress(ch, ring_name)
         alerts.append({
             "type": "PROGRESS_UPDATE",
-            "message": _format_alert_progress(ch, ring_name),
+            "message": progress_msg,
         })
+        if farm_id is not None:
+            await log_notification(
+                session,
+                farm_id=farm_id,
+                source="class_monitoring",
+                notification_type="PROGRESS_UPDATE",
+                message=progress_msg,
+                payload=ch,
+                entry_id=first.id,
+            )
 
     # ---------- Entry-level: match trips and detect changes ----------
     updated = 0
@@ -422,7 +482,18 @@ async def _process_one_class_with_data(
                 "class_name": class_name,
             }
             changes.append(ch)
-            alerts.append({"type": "RESULT", "message": _format_alert_result(ch)})
+            result_msg = _format_alert_result(ch)
+            alerts.append({"type": "RESULT", "message": result_msg})
+            if farm_id is not None:
+                await log_notification(
+                    session,
+                    farm_id=farm_id,
+                    source="class_monitoring",
+                    notification_type="RESULT",
+                    message=result_msg,
+                    payload=ch,
+                    entry_id=entry.id,
+                )
 
         # Horse completed trip
         if gone_in and not entry.gone_in:
@@ -435,10 +506,21 @@ async def _process_one_class_with_data(
             changes.append(ch)
             faults = trip.get("faults_one")
             time_one = trip.get("time_one")
+            horse_completed_msg = _format_alert_horse_completed(ch, faults=faults, time_s=time_one)
             alerts.append({
                 "type": "HORSE_COMPLETED",
-                "message": _format_alert_horse_completed(ch, faults=faults, time_s=time_one),
+                "message": horse_completed_msg,
             })
+            if farm_id is not None:
+                await log_notification(
+                    session,
+                    farm_id=farm_id,
+                    source="class_monitoring",
+                    notification_type="HORSE_COMPLETED",
+                    message=horse_completed_msg,
+                    payload=ch,
+                    entry_id=entry.id,
+                )
             # Step 7 placeholder: trigger Flow 3 when horse completes
             await trigger_flow_3_if_needed(
                 str(entry.horse_id),
@@ -455,7 +537,18 @@ async def _process_one_class_with_data(
                 "class_name": class_name,
             }
             changes.append(ch)
-            alerts.append({"type": "SCRATCHED", "message": _format_alert_scratched(ch)})
+            scratched_msg = _format_alert_scratched(ch)
+            alerts.append({"type": "SCRATCHED", "message": scratched_msg})
+            if farm_id is not None:
+                await log_notification(
+                    session,
+                    farm_id=farm_id,
+                    source="class_monitoring",
+                    notification_type="SCRATCHED",
+                    message=scratched_msg,
+                    payload=ch,
+                    entry_id=entry.id,
+                )
 
         # ---------- Update entry (Step 5) ----------
         entry.class_status = api_status

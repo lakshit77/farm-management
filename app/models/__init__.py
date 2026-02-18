@@ -10,6 +10,7 @@ from app.models.rider import Rider
 from app.models.show import Show
 from app.models.show_class import ShowClass
 from app.models.entry import Entry
+from app.models.notification_log import NotificationLog
 
 __all__ = [
     "Base",
@@ -20,6 +21,7 @@ __all__ = [
     "Event",
     "ShowClass",
     "Entry",
+    "NotificationLog",
     "Location",
     "HorseLocationHistory",
 ]

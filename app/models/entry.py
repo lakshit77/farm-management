@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import (
     Boolean,
@@ -14,7 +14,9 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    select,
     text,
+    tuple_,
 )
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -151,15 +153,35 @@ class Entry(Base):
 async def bulk_upsert_entries(
     session: AsyncSession,
     rows: List[Dict[str, Any]],
-) -> None:
+) -> Tuple[int, int]:
     """
     Bulk insert/update entries. Each dict has horse_id, rider_id, show_id, event_id,
     class_id, api_entry_id, api_horse_id, api_rider_id, api_class_id, api_ring_id,
     api_trainer_id, back_number, scheduled_date, estimated_start (and optional status/class_status).
     ON CONFLICT (horse_id, show_id, api_class_id) DO UPDATE SET rider_id, estimated_start, updated_at.
+
+    Returns:
+        (inserted_count, updated_count). Counts rows newly inserted vs rows updated.
     """
     if not rows:
-        return
+        return 0, 0
+    key_tuples = [
+        (r["horse_id"], r["show_id"], r.get("api_class_id"))
+        for r in rows
+        if r.get("api_class_id") is not None
+    ]
+    if not key_tuples:
+        existing_count = 0
+    else:
+        result = await session.execute(
+            select(Entry.id).where(
+                tuple_(Entry.horse_id, Entry.show_id, Entry.api_class_id).in_(key_tuples)
+            )
+        )
+        existing_count = len(result.all())
+    inserted = len(rows) - existing_count
+    updated = existing_count
+
     stmt = insert(Entry.__table__).values(rows)
     stmt = stmt.on_conflict_do_update(
         index_elements=["horse_id", "show_id", "api_class_id"],
@@ -171,3 +193,4 @@ async def bulk_upsert_entries(
         },
     )
     await session.execute(stmt)
+    return inserted, updated

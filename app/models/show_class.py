@@ -58,13 +58,16 @@ async def bulk_upsert_classes(
     session: AsyncSession,
     farm_id: uuid.UUID,
     rows: List[Tuple[str, Optional[str], Optional[str], Optional[Decimal], Optional[str]]],
-) -> None:
+) -> Tuple[int, int]:
     """
     Bulk insert/update classes. Each row is (name, class_number, sponsor, prize_money, class_type).
-    Uses ON CONFLICT (farm_id, name, class_number).
+    Uses ON CONFLICT (farm_id, name, class_number) DO NOTHING—so existing rows are not touched.
+
+    Returns:
+        (inserted_count, updated_count). updated_count is always 0 (DO NOTHING).
     """
     if not rows:
-        return
+        return 0, 0
     stmt = insert(ShowClass.__table__).values(
         [
             {
@@ -78,16 +81,12 @@ async def bulk_upsert_classes(
             for name, class_number, sponsor, prize_money, class_type in rows
         ]
     )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["farm_id", "name", "class_number"],
-        set_={
-            "sponsor": stmt.excluded.sponsor,
-            "prize_money": stmt.excluded.prize_money,
-            "class_type": stmt.excluded.class_type,
-            "updated_at": datetime.now(timezone.utc),
-        },
-    )
-    await session.execute(stmt)
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["farm_id", "name", "class_number"]
+    ).returning(ShowClass.id)
+    result = await session.execute(stmt)
+    inserted = len(result.all())
+    return inserted, 0
 
 
 async def get_classes_by_farm_keys(

@@ -11,7 +11,7 @@ import asyncio
 import logging
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict, Union
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,55 @@ from app.services.wellington_client import (
 logger = logging.getLogger(SCHEDULE_DAILY_LOGGER_NAME)
 
 ENTRY_DETAIL_BATCH_SIZE = 10
+
+
+# -----------------------------------------------------------------------------
+# Summary counts (nested structure for API/DB insertion and update counts)
+# -----------------------------------------------------------------------------
+
+
+class _EntityCounts(TypedDict, total=False):
+    """Counts for a single entity type: from_api, inserted, updated."""
+
+    from_api: int
+    inserted: int
+    updated: int
+
+
+class _EntryCounts(TypedDict, total=False):
+    """Entry-specific counts including detail/row stages."""
+
+    from_api: int
+    entry_details_fetched: int
+    entry_rows_built: int
+    inserted: int
+    updated: int
+
+
+def _entity_counts(
+    from_api: int = 0,
+    inserted: int = 0,
+    updated: int = 0,
+) -> _EntityCounts:
+    """Build a consistent entity-counts dict for rings, classes, horses, riders."""
+    return {"from_api": from_api, "inserted": inserted, "updated": updated}
+
+
+def _entry_counts(
+    from_api: int = 0,
+    entry_details_fetched: int = 0,
+    entry_rows_built: int = 0,
+    inserted: int = 0,
+    updated: int = 0,
+) -> _EntryCounts:
+    """Build entry-stage counts for summary."""
+    return {
+        "from_api": from_api,
+        "entry_details_fetched": entry_details_fetched,
+        "entry_rows_built": entry_rows_built,
+        "inserted": inserted,
+        "updated": updated,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -188,7 +237,9 @@ async def fetch_schedule_and_upsert_show(
     sync_date_str: str,
     customer_id_str: str,
     token: str,
-) -> Tuple[Any, str, int, List[dict], Optional[date], Optional[date]]:
+) -> Tuple[
+    Any, str, int, List[dict], Optional[date], Optional[date], int, int
+]:
     """
     Fetch the daily schedule from Wellington API and upsert the show in the DB.
 
@@ -206,6 +257,8 @@ async def fetch_schedule_and_upsert_show(
         - rings_data: List of ring dicts from the schedule (ring_name, ring_number, classes, etc.).
         - start_date: Parsed show start date or None.
         - end_date: Parsed show end date or None.
+        - show_inserted: 1 if show was inserted, 0 otherwise.
+        - show_updated: 1 if show was updated (already existed), 0 otherwise.
 
     **What it does:** GET /schedule, parse show and rings; upsert show by (farm_id, api_show_id); return show id and raw rings for downstream steps.
     """
@@ -220,10 +273,19 @@ async def fetch_schedule_and_upsert_show(
     if not api_show_id:
         raise WellingtonAPIError("Schedule response missing show_id")
 
-    show_uuid = await upsert_show(
+    show_uuid, show_inserted, show_updated = await upsert_show(
         session, farm_id, api_show_id, show_name, start_date, end_date
     )
-    return show_uuid, show_name, api_show_id, rings_data, start_date, end_date
+    return (
+        show_uuid,
+        show_name,
+        api_show_id,
+        rings_data,
+        start_date,
+        end_date,
+        show_inserted,
+        show_updated,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -235,9 +297,9 @@ async def upsert_events_and_build_ring_map(
     session: AsyncSession,
     farm_id: Any,
     rings_data: List[dict],
-) -> Dict[int, Any]:
+) -> Tuple[Dict[int, Any], int, int]:
     """
-    Bulk upsert events (rings) and return a mapping from ring_number to event UUID.
+    Bulk upsert events (rings) and return a mapping from ring_number to event UUID and counts.
 
     **Input (request):**
         - session: AsyncSession.
@@ -246,17 +308,21 @@ async def upsert_events_and_build_ring_map(
 
     **Output (response):**
         - ring_number_to_event_id: Dict[ring_number, event_uuid]. Used to set event_id on entries.
+        - events_inserted: Number of event rows inserted.
+        - events_updated: Number of event rows updated (0 when using DO NOTHING).
 
     **What it does:** Bulk insert/update events on (farm_id, name); then select events for this farm to build ring_number → id.
     """
     event_rows = [(r.get("ring_name") or "", r.get("ring_number")) for r in rings_data]
-    await bulk_upsert_events(session, farm_id, event_rows)
+    events_inserted, events_updated = await bulk_upsert_events(
+        session, farm_id, event_rows
+    )
     event_list = await get_events_by_farm_for_rings(session, farm_id)
     ring_number_to_event_id: Dict[int, Any] = {}
     for eid, _ename, rnum in event_list:
         if rnum is not None:
             ring_number_to_event_id[rnum] = eid
-    return ring_number_to_event_id
+    return ring_number_to_event_id, events_inserted, events_updated
 
 
 # -----------------------------------------------------------------------------
@@ -268,9 +334,9 @@ async def upsert_classes_and_build_class_map(
     session: AsyncSession,
     farm_id: Any,
     rings_data: List[dict],
-) -> Dict[int, Any]:
+) -> Tuple[Dict[int, Any], int, int, int]:
     """
-    Bulk upsert classes (deduped by api_class_id) and return api_class_id → class UUID.
+    Bulk upsert classes (deduped by api_class_id) and return api_class_id → class UUID and counts.
 
     **Input (request):**
         - session: AsyncSession.
@@ -279,6 +345,9 @@ async def upsert_classes_and_build_class_map(
 
     **Output (response):**
         - api_class_id_to_class_id: Dict[api_class_id, class_uuid]. Used to set class_id on entries.
+        - classes_from_api: Number of distinct classes from API (deduped).
+        - classes_inserted: Number of class rows inserted.
+        - classes_updated: Number of class rows updated (0 when using DO NOTHING).
 
     **What it does:** Dedupes classes by class_id, bulk upserts by (farm_id, name, class_number), then selects to build api_class_id → id.
     """
@@ -289,8 +358,16 @@ async def upsert_classes_and_build_class_map(
             cid = c.get("class_id")
             if cid is None or cid in seen_class_ids:
                 continue
-            seen_class_ids.add(cid)
+            # Only process classes that have a name and at least one trip (valid class)
             cname = (c.get("class_name") or "").strip()
+            total_trips = c.get("total_trips")
+            try:
+                total_trips_val = int(total_trips) if total_trips is not None else 0
+            except (TypeError, ValueError):
+                total_trips_val = 0
+            if not cname or total_trips_val <= 0:
+                continue
+            seen_class_ids.add(cid)
             cnum = (
                 str(c.get("class_number", "")).strip()
                 if c.get("class_number") is not None
@@ -304,15 +381,18 @@ async def upsert_classes_and_build_class_map(
                 except Exception:
                     prize = None
             ctype = (c.get("class_type") or "").strip() or None
-            if cname:
-                class_keys.append((cid, cname, cnum, sponsor, prize, ctype))
+            class_keys.append((cid, cname, cnum, sponsor, prize, ctype))
 
+    classes_from_api = len(class_keys)
+    classes_inserted, classes_updated = 0, 0
     class_rows = [
         (cname, cnum, sponsor, prize, ctype)
         for _, cname, cnum, sponsor, prize, ctype in class_keys
     ]
     if class_rows:
-        await bulk_upsert_classes(session, farm_id, class_rows)
+        classes_inserted, classes_updated = await bulk_upsert_classes(
+            session, farm_id, class_rows
+        )
 
     keys_for_select = [(cname, cnum) for _, cname, cnum, *_ in class_keys]
     class_id_list = await get_classes_by_farm_keys(session, farm_id, keys_for_select)
@@ -323,7 +403,12 @@ async def upsert_classes_and_build_class_map(
     for api_cid, cname, cnum, *_ in class_keys:
         api_class_id_to_class_id[api_cid] = name_cnum_to_id.get((cname, cnum))
 
-    return api_class_id_to_class_id
+    return (
+        api_class_id_to_class_id,
+        classes_from_api,
+        classes_inserted,
+        classes_updated,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -484,9 +569,16 @@ async def upsert_horses_and_riders_and_get_maps(
     farm_id: Any,
     horse_names: Set[str],
     rider_names: Set[str],
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+) -> Tuple[
+    Dict[str, Any],
+    Dict[str, Any],
+    int,
+    int,
+    int,
+    int,
+]:
     """
-    Bulk upsert horses and riders, then return name → UUID maps for this farm.
+    Bulk upsert horses and riders, then return name → UUID maps and counts.
 
     **Input (request):**
         - session: AsyncSession.
@@ -497,16 +589,31 @@ async def upsert_horses_and_riders_and_get_maps(
     **Output (response):**
         - horse_name_to_id: Dict[horse_name, horse_uuid].
         - rider_name_to_id: Dict[rider_name, rider_uuid].
+        - horses_inserted: Number of horse rows inserted.
+        - horses_updated: Number of horse rows updated (0 when DO NOTHING).
+        - riders_inserted: Number of rider rows inserted.
+        - riders_updated: Number of rider rows updated (0 when DO NOTHING).
 
     **What it does:** bulk_upsert_horses / bulk_upsert_riders (ON CONFLICT DO NOTHING), then get_horse_ids_by_names / get_rider_ids_by_names to build the maps.
     """
-    await bulk_upsert_horses(session, farm_id, list(horse_names))
+    horses_inserted, horses_updated = await bulk_upsert_horses(
+        session, farm_id, list(horse_names)
+    )
     horse_id_list = await get_horse_ids_by_names(session, farm_id, list(horse_names))
     horse_name_to_id: Dict[str, Any] = {n: i for i, n in horse_id_list}
-    await bulk_upsert_riders(session, farm_id, list(rider_names))
+    riders_inserted, riders_updated = await bulk_upsert_riders(
+        session, farm_id, list(rider_names)
+    )
     rider_id_list = await get_rider_ids_by_names(session, farm_id, list(rider_names))
     rider_name_to_id: Dict[str, Any] = {n: i for i, n in rider_id_list}
-    return horse_name_to_id, rider_name_to_id
+    return (
+        horse_name_to_id,
+        rider_name_to_id,
+        horses_inserted,
+        horses_updated,
+        riders_inserted,
+        riders_updated,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -519,7 +626,7 @@ async def resolve_entry_rows_and_upsert(
     entry_rows: List[Dict[str, Any]],
     horse_name_to_id: Dict[str, Any],
     rider_name_to_id: Dict[str, Any],
-) -> int:
+) -> Tuple[int, int, int]:
     """
     Replace _horse_name / _rider_name in entry rows with UUIDs, drop invalid rows, and bulk upsert entries.
 
@@ -530,7 +637,9 @@ async def resolve_entry_rows_and_upsert(
         - rider_name_to_id: Map rider name → rider UUID.
 
     **Output (response):**
-        - Number of entry rows actually upserted (after dropping rows with no horse_id).
+        - total_upserted: Number of entry rows actually upserted (after dropping rows with no horse_id).
+        - entries_inserted: Number of entry rows newly inserted.
+        - entries_updated: Number of entry rows updated.
 
     **What it does:** Pops _horse_name / _rider_name, sets horse_id and rider_id from maps; filters out rows with no horse_id; calls bulk_upsert_entries.
     """
@@ -541,9 +650,12 @@ async def resolve_entry_rows_and_upsert(
         if row["horse_id"] is None and horse_name_to_id:
             row["horse_id"] = next(iter(horse_name_to_id.values()))
     valid_rows = [r for r in entry_rows if r.get("horse_id") is not None]
+    entries_inserted, entries_updated = 0, 0
     if valid_rows:
-        await bulk_upsert_entries(session, valid_rows)
-    return len(valid_rows)
+        entries_inserted, entries_updated = await bulk_upsert_entries(
+            session, valid_rows
+        )
+    return len(valid_rows), entries_inserted, entries_updated
 
 
 # -----------------------------------------------------------------------------
@@ -558,6 +670,7 @@ def build_summary(
     unique_class_count: int,
     total_synced_entries: int,
     time_ring_list: List[Tuple[str, str]],
+    counts: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Build the step-9 summary object (no Telegram send).
@@ -569,9 +682,10 @@ def build_summary(
         - unique_class_count: Number of distinct classes (rows in `classes` table).
         - total_synced_entries: Number of entry rows upserted (horse+class; rows in `entries` table).
         - time_ring_list: List of (estimated_start_utc_str, ring_name).
+        - counts: Optional nested dict with show, rings, classes, horses, riders, entries (from_api/inserted/updated and entry stages). Included in summary when provided.
 
     **Output (response):**
-        - summary: Dict with date, show_name, unique_horse_count, unique_class_count, total_synced_entries, unique_ring_count, first_class, last_class. first_class/last_class span the full show date range (may be outside sync date).
+        - summary: Dict with date, show_name, unique_horse_count, unique_class_count, total_synced_entries, unique_ring_count, first_class, last_class, and optionally "counts" (nested). first_class/last_class span the full show date range (may be outside sync date).
 
     **What it does:** Computes unique_ring_count from time_ring_list; sorts by time to set first_class and last_class; returns the summary dict for the API response.
     """
@@ -588,7 +702,7 @@ def build_summary(
             "time": time_ring_list_sorted[-1][0],
             "ring_name": time_ring_list_sorted[-1][1],
         }
-    return {
+    out: Dict[str, Any] = {
         "date": sync_date_str,
         "show_name": show_name,
         "unique_horse_count": unique_horse_count,
@@ -599,6 +713,9 @@ def build_summary(
         "first_class": first_class,
         "last_class": last_class,
     }
+    if counts is not None:
+        out["counts"] = counts
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -635,29 +752,43 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                 rings_data,
                 _start_date,
                 _end_date,
+                show_inserted,
+                show_updated,
             ) = await fetch_schedule_and_upsert_show(
                 session, farm_id, sync_date_str, customer_id_str, token
             )
             print("[Flow 1] Schedule fetched | show=%s" % show_name)
 
-            ring_number_to_event_id = await upsert_events_and_build_ring_map(
+            (
+                ring_number_to_event_id,
+                events_inserted,
+                events_updated,
+            ) = await upsert_events_and_build_ring_map(
                 session, farm_id, rings_data
             )
-            print("[Flow 1] Events (rings) upserted | count=%s" % len(rings_data))
+            rings_from_api = len(rings_data)
+            print("[Flow 1] Events (rings) upserted | from_api=%s inserted=%s updated=%s" % (rings_from_api, events_inserted, events_updated))
 
-            api_class_id_to_class_id = await upsert_classes_and_build_class_map(
+            (
+                api_class_id_to_class_id,
+                classes_from_api,
+                classes_inserted,
+                classes_updated,
+            ) = await upsert_classes_and_build_class_map(
                 session, farm_id, rings_data
             )
-            print("[Flow 1] Classes upserted | count=%s" % len(api_class_id_to_class_id))
+            print("[Flow 1] Classes upserted | from_api=%s inserted=%s updated=%s" % (classes_from_api, classes_inserted, classes_updated))
 
             entries_my = await get_entries_my(api_show_id, customer_id_str, token=token)
             entries_list = entries_my.get("entries") or []
-            print("[Flow 1] My entries fetched | count=%s" % len(entries_list))
+            entries_from_api = len(entries_list)
+            print("[Flow 1] My entries fetched | count=%s" % entries_from_api)
 
             entry_details = await fetch_entry_details(
                 api_show_id, customer_id_str, token, entries_list
             )
-            print("[Flow 1] Entry details fetched | count=%s" % len(entry_details))
+            entry_details_fetched = len(entry_details)
+            print("[Flow 1] Entry details fetched | count=%s" % entry_details_fetched)
 
             (
                 entry_rows,
@@ -671,18 +802,66 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                 ring_number_to_event_id,
                 api_class_id_to_class_id,
             )
-            print("[Flow 1] Entry rows built | horses=%s riders=%s rows=%s" % (len(horse_names), len(rider_names), len(entry_rows)))
+            entry_rows_built = len(entry_rows)
+            print("[Flow 1] Entry rows built | horses=%s riders=%s rows=%s" % (len(horse_names), len(rider_names), entry_rows_built))
 
-            horse_name_to_id, rider_name_to_id = await upsert_horses_and_riders_and_get_maps(
+            (
+                horse_name_to_id,
+                rider_name_to_id,
+                horses_inserted,
+                horses_updated,
+                riders_inserted,
+                riders_updated,
+            ) = await upsert_horses_and_riders_and_get_maps(
                 session, farm_id, horse_names, rider_names
             )
-            print("[Flow 1] Horses + riders upserted")
+            horses_from_api = len(horse_names)
+            riders_from_api = len(rider_names)
+            print("[Flow 1] Horses + riders upserted | horses: from_api=%s inserted=%s updated=%s | riders: from_api=%s inserted=%s updated=%s" % (horses_from_api, horses_inserted, horses_updated, riders_from_api, riders_inserted, riders_updated))
 
-            total_synced_entries = await resolve_entry_rows_and_upsert(
+            (
+                total_synced_entries,
+                entries_inserted,
+                entries_updated,
+            ) = await resolve_entry_rows_and_upsert(
                 session, entry_rows, horse_name_to_id, rider_name_to_id
             )
-            print("[Flow 1] Entries upserted | count=%s" % total_synced_entries)
+            print("[Flow 1] Entries upserted | from_api=%s details_fetched=%s rows_built=%s inserted=%s updated=%s" % (entries_from_api, entry_details_fetched, entry_rows_built, entries_inserted, entries_updated))
 
+            counts: Dict[str, Any] = {
+                "show": {
+                    "name": show_name,
+                    "inserted": show_inserted,
+                    "updated": show_updated,
+                },
+                "rings": _entity_counts(
+                    from_api=rings_from_api,
+                    inserted=events_inserted,
+                    updated=events_updated,
+                ),
+                "classes": _entity_counts(
+                    from_api=classes_from_api,
+                    inserted=classes_inserted,
+                    updated=classes_updated,
+                ),
+                "horses": _entity_counts(
+                    from_api=horses_from_api,
+                    inserted=horses_inserted,
+                    updated=horses_updated,
+                ),
+                "riders": _entity_counts(
+                    from_api=riders_from_api,
+                    inserted=riders_inserted,
+                    updated=riders_updated,
+                ),
+                "entries": _entry_counts(
+                    from_api=entries_from_api,
+                    entry_details_fetched=entry_details_fetched,
+                    entry_rows_built=entry_rows_built,
+                    inserted=entries_inserted,
+                    updated=entries_updated,
+                ),
+            }
             summary = build_summary(
                 sync_date_str,
                 show_name,
@@ -690,6 +869,7 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                 len(api_class_id_to_class_id),  # distinct classes (rows in classes table)
                 total_synced_entries,           # horse+class rows (rows in entries table)
                 time_ring_list,
+                counts=counts,
             )
 
             await session.commit()
