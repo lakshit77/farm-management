@@ -91,11 +91,22 @@ def _normalize_time_for_display(
 async def get_schedule_view(
     session: AsyncSession,
     view_date: date,
+    horse_name: Optional[str] = None,
+    class_name: Optional[str] = None,
 ) -> ScheduleViewData:
     """
     Load schedule for the given date: events (rings) with classes and entries.
     Each entry includes horse, rider, and all backend status fields.
     Scoped by farm (FARM_NAME, CUSTOMER_ID from env).
+
+    **Input (request):**
+        - session: AsyncSession.
+        - view_date: Date to load schedule for.
+        - horse_name: Optional case-insensitive partial match filter on horse name.
+        - class_name: Optional case-insensitive partial match filter on class name.
+
+    **Output (response):**
+        - ScheduleViewData with nested events → classes → entries, filtered when params given.
     """
     cid = _parse_customer_id(CUSTOMER_ID)
     farm = await get_farm_by_name_and_customer(session, FARM_NAME, cid)
@@ -122,6 +133,14 @@ async def get_schedule_view(
     )
     result = await session.execute(stmt)
     entries = list(result.scalars().unique())
+
+    # Apply optional server-side filters after loading (avoids complex joins with selectinload)
+    if horse_name:
+        hn_lower = horse_name.strip().lower()
+        entries = [e for e in entries if e.horse and hn_lower in (e.horse.name or "").lower()]
+    if class_name:
+        cn_lower = class_name.strip().lower()
+        entries = [e for e in entries if e.show_class and cn_lower in (e.show_class.name or "").lower()]
 
     # Build nested structure: event_id -> class_id -> [entries]
     by_event: Dict[str, Dict[str, List[Entry]]] = {}

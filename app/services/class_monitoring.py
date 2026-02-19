@@ -29,7 +29,7 @@ from app.core.enums import (
 from app.models.entry import Entry
 from app.models.show import Show
 from app.services.notification_log import log_notification
-from app.services.schedule import ensure_farm_and_token
+from app.services.schedule import ensure_farm_and_token, resolve_sync_date
 from app.services.wellington_client import WellingtonAPIError, get_class
 
 logger = logging.getLogger(__name__)
@@ -636,9 +636,12 @@ async def _process_one_class_with_data(
 # -----------------------------------------------------------------------------
 
 
-async def run_class_monitoring() -> Dict[str, Any]:
+async def run_class_monitoring(date_override: Optional[str] = None) -> Dict[str, Any]:
     """
     Execute Flow 2 (Class Monitoring) end-to-end: one DB session, same farm/customer as Flow 1.
+
+    **Input (request):**
+        - date_override: Optional "YYYY-MM-DD" (UTC). If None or invalid, uses today UTC.
 
     **Output (response):**
         - summary: classes_checked, entries_updated, total_changes, total_alerts.
@@ -647,7 +650,7 @@ async def run_class_monitoring() -> Dict[str, Any]:
         Step 6 (Telegram) is not implemented — alert info is in the response.
         Step 7 (Trigger Flow 3) is a no-op placeholder.
     """
-    today = datetime.now(timezone.utc).date()
+    _, today = resolve_sync_date(date_override)
     customer_id_str = (CUSTOMER_ID or "").strip() or "15"
 
     async with AsyncSessionLocal() as session:
