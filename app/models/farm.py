@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import Integer, select, String
+from sqlalchemy import DateTime, Integer, select, String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +26,10 @@ class Farm(Base):
     settings: Mapped[Optional[dict]] = jsonb_col()
     created_at: Mapped[datetime] = ts_created()
     updated_at: Mapped[Optional[datetime]] = ts_updated()
+    # When class monitoring (Flow 2) last ran for this farm (UTC).
+    class_monitoring_last_run_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 # -----------------------------------------------------------------------------

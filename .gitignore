@@ -22,6 +22,10 @@ env/
 logs/
 *.log
 
+# Runtime state (class monitoring last run timestamp)
+app/class_monitoring_last_run.json
+class_monitoring_last_run.json
+
 # Testing / build
 .pytest_cache/
 .coverage

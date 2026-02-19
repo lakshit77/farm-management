@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.core.constants import CUSTOMER_ID, FARM_NAME
 from app.core.enums import EntryStatus
 from app.models.entry import Entry
+from app.services.class_monitoring_last_run import format_last_run_at_for_display
 from app.models.event import Event
 from app.models.farm import get_farm_by_name_and_customer
 from app.models.horse import Horse
@@ -111,7 +112,7 @@ async def get_schedule_view(
     cid = _parse_customer_id(CUSTOMER_ID)
     farm = await get_farm_by_name_and_customer(session, FARM_NAME, cid)
     if farm is None:
-        return ScheduleViewData(date=view_date.isoformat(), events=[])
+        return ScheduleViewData(date=view_date.isoformat(), events=[], class_monitoring_last_run=None)
 
     # Load all entries for this date with show.farm_id = farm.id, and relations
     stmt = (
@@ -215,12 +216,14 @@ async def get_schedule_view(
 
     inactive_views = [_entry_to_view(e) for e in inactive_entries_list]
 
+    last_run_str = format_last_run_at_for_display(farm.class_monitoring_last_run_at)
     return ScheduleViewData(
         date=view_date.isoformat(),
         show_name=show_name,
         show_id=show_id,
         events=events_out,
         inactive_entries=inactive_views,
+        class_monitoring_last_run=last_run_str,
     )
 
 

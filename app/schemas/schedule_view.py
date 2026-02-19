@@ -105,3 +105,5 @@ class ScheduleViewData(BaseModel):
     show_id: Optional[str] = None
     events: List[EventView] = []
     inactive_entries: List[EntryView] = []
+    # When the class monitoring job last ran (America/New_York), e.g. "Wed, 19 Feb 2026, 10:30 AM EST"
+    class_monitoring_last_run: Optional[str] = None

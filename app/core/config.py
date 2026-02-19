@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     LOG_DIR: str = "logs"
     LOG_LEVEL: str = "INFO"
 
+    # Venue timezone for schedule times (Wellington FL = America/New_York).
+    # API returns times in venue local; we convert to UTC for free-time calculation.
+    VENUE_TIMEZONE: str = "America/New_York"
+
 
 @lru_cache
 def get_settings() -> Settings:

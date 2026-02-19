@@ -27,7 +27,9 @@ from app.core.enums import (
     NotificationType,
 )
 from app.models.entry import Entry
+from app.models.farm import Farm
 from app.models.show import Show
+from app.services.horse_availability import run_flow_3_horse_availability
 from app.services.notification_log import log_notification
 from app.services.schedule import ensure_farm_and_token, resolve_sync_date
 from app.services.wellington_client import WellingtonAPIError, get_class
@@ -39,37 +41,52 @@ UNPLACED_PLACING = 100000
 
 
 # -----------------------------------------------------------------------------
-# Step 7 (placeholder): Trigger Flow 3 when horse completes — to be implemented later
+# Step 7: Trigger Flow 3 when horse completes (Horse Availability)
 # -----------------------------------------------------------------------------
 
 
 async def trigger_flow_3_if_needed(
-    horse_id: str,
+    session: AsyncSession,
+    farm_id: Any,
+    horse_id: Any,
     horse_name: str,
-    completed_class_id: str,
-    show_id: str,
+    completed_entry_id: Any,
+    completed_class_id: Any,
+    show_id: Any,
+    completed_class_name: str,
+    completed_ring_name: str,
 ) -> None:
     """
-    Placeholder for Flow 3 (Horse Availability). Called when a horse completes a trip (gone_in 0→1).
+    Trigger Flow 3 (Horse Availability) when a horse completes a trip (gone_in 0→1).
 
-    To be implemented later: will trigger Flow 3 with the given parameters to calculate
-    horse's free time and next scheduled class.
+    Calculates free time and next class, logs availability message to notification_log.
+    Does not send Telegram; message is stored in notification_log.
 
     **Input (request):**
+        - session: AsyncSession (caller-owned; same transaction as entry updates).
+        - farm_id: Farm UUID (for notification_log).
         - horse_id: Horse UUID.
         - horse_name: Horse display name.
+        - completed_entry_id: Entry UUID just completed.
         - completed_class_id: Class UUID just completed.
         - show_id: Current show UUID.
+        - completed_class_name: Class name for message.
+        - completed_ring_name: Ring name for message.
     """
-    # TODO: Implement Flow 3 trigger (e.g. call Flow 3 service or enqueue job).
-    logger.debug(
-        "Flow 3 placeholder: would trigger for horse_id=%s horse_name=%s completed_class_id=%s show_id=%s",
-        horse_id,
-        horse_name,
-        completed_class_id,
-        show_id,
+    if not farm_id:
+        logger.warning("Flow 3: skipping (no farm_id)")
+        return
+    await run_flow_3_horse_availability(
+        session=session,
+        farm_id=farm_id,
+        horse_id=horse_id,
+        horse_name=horse_name,
+        completed_entry_id=completed_entry_id,
+        completed_class_id=completed_class_id,
+        show_id=show_id,
+        completed_class_name=completed_class_name,
+        completed_ring_name=completed_ring_name,
     )
-    pass
 
 
 # -----------------------------------------------------------------------------
@@ -253,11 +270,26 @@ def _format_alert_status_change(
     return f"Status: {new_status}\n\n📋 {class_name}\n📍 {ring_name}"
 
 
+def _time_for_display(s: Optional[str]) -> str:
+    """
+    Return time-only (HH:MM:SS) for display in time-change notifications.
+    Date is redundant since all data is for the same day/event.
+    """
+    if s is None or not isinstance(s, str):
+        return "—"
+    s = s.strip()
+    if not s or s == "—":
+        return "—"
+    if " " in s:
+        return s.split()[-1]  # YYYY-MM-DD HH:MM:SS -> HH:MM:SS
+    return s  # Already HH:MM:SS
+
+
 def _format_alert_time_change(change: Dict[str, Any], ring_name: str) -> str:
-    """Build TIME_CHANGE alert message."""
+    """Build TIME_CHANGE alert message. Shows time only (no date) for same-day context."""
     class_name = change.get("class_name") or "Unknown Class"
-    old_t = change.get("old") or "—"
-    new_t = change.get("new") or "—"
+    old_t = _time_for_display(change.get("old"))
+    new_t = _time_for_display(change.get("new"))
     return (
         "⏰ Time Change\n\n"
         f"📋 {class_name}\n"
@@ -566,13 +598,19 @@ async def _process_one_class_with_data(
                     payload=ch,
                     entry_id=entry.id,
                 )
-            # Step 7 placeholder: trigger Flow 3 when horse completes
-            await trigger_flow_3_if_needed(
-                str(entry.horse_id),
-                horse_name,
-                str(entry.class_id) if entry.class_id else "",
-                str(entry.show_id) if entry.show_id else "",
-            )
+            # Step 7: trigger Flow 3 (Horse Availability) when horse completes
+            if entry.show_id and entry.class_id:
+                await trigger_flow_3_if_needed(
+                    session=session,
+                    farm_id=farm_id,
+                    horse_id=entry.horse_id,
+                    horse_name=horse_name,
+                    completed_entry_id=entry.id,
+                    completed_class_id=entry.class_id,
+                    show_id=entry.show_id,
+                    completed_class_name=class_name,
+                    completed_ring_name=ring_name,
+                )
 
         # Horse scratched
         if scratch_trip and not entry.scratch_trip:
@@ -700,6 +738,11 @@ async def run_class_monitoring(date_override: Optional[str] = None) -> Dict[str,
             total_updated += updated
             all_changes.extend(changes)
             all_alerts.extend(alerts)
+
+        # Store class monitoring last run on the farm (per-farm)
+        farm = await session.get(Farm, farm_id)
+        if farm is not None:
+            farm.class_monitoring_last_run_at = datetime.now(timezone.utc)
 
         await session.commit()
 

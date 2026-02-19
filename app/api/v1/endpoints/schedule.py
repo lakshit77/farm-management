@@ -45,6 +45,7 @@ async def class_monitor(
 ) -> ApiResponse[dict[str, Any]]:
     """
     Run Flow 2 (Class Monitoring). Returns data including changes and alerts for consumers.
+    Last run time is stored on the farm (farms.class_monitoring_last_run_at).
     """
     data = await run_class_monitoring(date_override=date)
     return success_response(data=data)
