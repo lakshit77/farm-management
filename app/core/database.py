@@ -17,6 +17,8 @@ def get_async_engine():
         pool_pre_ping=True,
         pool_size=5,
         max_overflow=10,
+        # Recycle connections after 10 min to avoid stale connections (e.g. server idle timeout).
+        pool_recycle=600,
     )
 
 
