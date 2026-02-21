@@ -14,9 +14,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.constants import CUSTOMER_ID
 from app.core.database import AsyncSessionLocal
@@ -26,9 +24,12 @@ from app.core.enums import (
     NotificationSource,
     NotificationType,
 )
-from app.models.entry import Entry
+from app.models.entry import (
+    Entry,
+    count_entries_for_farm_on_date,
+    get_active_entries_for_farm_on_date,
+)
 from app.models.farm import Farm
-from app.models.show import Show
 from app.services.horse_availability import run_flow_3_horse_availability
 from app.services.notification_log import log_notification
 from app.services.schedule import ensure_farm_and_token, resolve_sync_date
@@ -111,26 +112,7 @@ async def get_active_classes_and_entries(
     **Output (response):**
         - List of (show_id UUID, api_show_id int, list of Entry ORM objects with relations).
     """
-    stmt = (
-        select(Entry)
-        .join(Show, Entry.show_id == Show.id)
-        .where(
-            and_(
-                Show.farm_id == farm_id,
-                Entry.scheduled_date == today,
-                Entry.api_class_id.isnot(None),
-                (Entry.class_status.is_(None) | (Entry.class_status != ClassStatus.COMPLETED.value)),
-            )
-        )
-        .options(
-            selectinload(Entry.horse),
-            selectinload(Entry.show_class),
-            selectinload(Entry.event),
-            selectinload(Entry.show),
-        )
-    )
-    result = await session.execute(stmt)
-    all_entries = list(result.scalars().unique())
+    all_entries = await get_active_entries_for_farm_on_date(session, farm_id, today)
 
     # Group by (api_class_id, show_id) — same class in same show
     by_class: Dict[Tuple[int, Any], List[Any]] = {}
@@ -678,10 +660,16 @@ async def run_class_monitoring(date_override: Optional[str] = None) -> Dict[str,
     """
     Execute Flow 2 (Class Monitoring) end-to-end: one DB session, same farm/customer as Flow 1.
 
+    Only runs (and writes to DB) if there is at least one entry for the given date for this
+    farm — i.e. Flow 1 (daily schedule) must have run for that date first. Otherwise returns
+    skipped=True and does not update the farm or commit.
+
     **Input (request):**
         - date_override: Optional "YYYY-MM-DD" (UTC). If None or invalid, uses today UTC.
 
     **Output (response):**
+        - skipped: True if no entries for date (run Flow 1 first); False otherwise.
+        - reason, message: Set when skipped is True.
         - summary: classes_checked, entries_updated, total_changes, total_alerts.
         - changes: list of structured change objects (type, class_name, horse, etc.).
         - alerts: list of { "type", "message" } with pre-formatted alert text (Telegram-style).
@@ -698,6 +686,28 @@ async def run_class_monitoring(date_override: Optional[str] = None) -> Dict[str,
         except Exception as e:
             logger.exception("Flow 2: ensure_farm or get_active_classes failed: %s", e)
             raise
+
+        # Guard: only run Flow 2 (and write to DB) if Flow 1 has run for this date (entries exist).
+        entries_count = await count_entries_for_farm_on_date(session, farm_id, today)
+        if entries_count == 0:
+            logger.info(
+                "Flow 2: skipped (no entries for date=%s); run Flow 1 (daily schedule) first.",
+                today.isoformat(),
+            )
+            return {
+                "skipped": True,
+                "reason": "no_entries_for_date",
+                "message": "Run Flow 1 (daily schedule) for this date first.",
+                "summary": {
+                    "date": today.isoformat(),
+                    "classes_checked": 0,
+                    "entries_updated": 0,
+                    "total_changes": 0,
+                    "total_alerts": 0,
+                },
+                "changes": [],
+                "alerts": [],
+            }
 
         # Fetch all class data in parallel (I/O only); no shared session, no DB writes
         fetch_tasks = [
@@ -747,6 +757,7 @@ async def run_class_monitoring(date_override: Optional[str] = None) -> Dict[str,
         await session.commit()
 
     return {
+        "skipped": False,
         "summary": {
             "date": today.isoformat(),
             "classes_checked": len(classes_and_entries),

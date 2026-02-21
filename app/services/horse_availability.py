@@ -11,13 +11,11 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.enums import NotificationSource, NotificationType
-from app.models.entry import Entry
+from app.models.entry import Entry, get_horse_remaining_entries_today
 from app.services.notification_log import log_notification
 
 logger = logging.getLogger(__name__)
@@ -112,27 +110,9 @@ async def get_remaining_classes_today(
     **Output (response):**
         - List of Entry instances ordered by estimated_start ASC, with show_class and event loaded.
     """
-    stmt = (
-        select(Entry)
-        .where(
-            Entry.horse_id == horse_id,
-            Entry.show_id == show_id,
-            Entry.scheduled_date == today,
-            Entry.id != completed_entry_id,
-            Entry.gone_in.is_(False),
-            or_(
-                Entry.class_status.is_(None),
-                Entry.class_status != "Completed",
-            ),
-        )
-        .order_by(Entry.estimated_start.asc().nulls_last())
-        .options(
-            selectinload(Entry.show_class),
-            selectinload(Entry.event),
-        )
+    return await get_horse_remaining_entries_today(
+        session, horse_id, show_id, completed_entry_id, today
     )
-    result = await session.execute(stmt)
-    return list(result.scalars().unique().all())
 
 
 def _build_availability_message(

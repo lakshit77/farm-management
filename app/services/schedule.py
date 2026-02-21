@@ -122,6 +122,14 @@ def _parse_date(s: Optional[str]) -> Optional[date]:
         return None
 
 
+def _normalize_class_number(value: Any) -> Optional[str]:
+    """Normalize API class_number to Optional[str] for (name, class_number) lookup."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
+
+
 def _estimated_start_utc(
     scheduled_date_str: Optional[str],
     schedule_starttime: Optional[str],
@@ -454,6 +462,52 @@ async def fetch_entry_details(
     return entry_details
 
 
+async def get_or_create_class_map_from_entry_details(
+    session: AsyncSession,
+    farm_id: Any,
+    entry_details: List[dict],
+) -> Dict[Tuple[str, Optional[str]], Any]:
+    """
+    Build (class_name, class_number) -> class UUID map from entry details.
+    Ensures every class referenced in entry details exists in the classes table
+    (get-or-create by name + class_number) so entries never get class_id = NULL.
+
+    **Input (request):**
+        - session: AsyncSession (caller-owned).
+        - farm_id: Farm UUID.
+        - entry_details: List of entry-detail dicts (entry, classes, entry_riders).
+
+    **Output (response):**
+        - Map (class_name, class_number) -> class UUID. Keys use normalized name and class_number.
+    """
+    keys_set: Set[Tuple[str, Optional[str]]] = set()
+    for ed in entry_details:
+        for cl in ed.get("classes") or []:
+            name = (cl.get("name") or "").strip()
+            if not name:
+                continue
+            cnum = _normalize_class_number(cl.get("class_number"))
+            keys_set.add((name, cnum))
+    keys_list = list(keys_set)
+    if not keys_list:
+        return {}
+
+    existing = await get_classes_by_farm_keys(session, farm_id, keys_list)
+    name_cnum_to_id: Dict[Tuple[str, Optional[str]], Any] = {
+        (r[1], r[2]): r[0] for r in existing
+    }
+    missing = [(n, c) for n, c in keys_list if (n, c) not in name_cnum_to_id]
+    if missing:
+        await bulk_upsert_classes(
+            session,
+            farm_id,
+            [(name, cnum, None, None, None) for name, cnum in missing],
+        )
+        existing_after = await get_classes_by_farm_keys(session, farm_id, keys_list)
+        name_cnum_to_id = {(r[1], r[2]): r[0] for r in existing_after}
+    return name_cnum_to_id
+
+
 # -----------------------------------------------------------------------------
 # Flow 1 – Build entry rows and collect horses/riders/time–ring list
 # -----------------------------------------------------------------------------
@@ -464,18 +518,20 @@ def build_entry_rows_and_collect_entities(
     rings_data: List[dict],
     show_uuid: Any,
     ring_number_to_event_id: Dict[int, Any],
-    api_class_id_to_class_id: Dict[int, Any],
+    name_class_number_to_class_id: Dict[Tuple[str, Optional[str]], Any],
     sync_date: Optional[date] = None,
 ) -> Tuple[List[Dict[str, Any]], Set[str], Set[str], List[Tuple[str, str]]]:
     """
     From entry details, build DB entry rows (with _horse_name / _rider_name placeholders) and collect unique horses, riders, and (time, ring_name) for summary.
+
+    Resolves class_id by (class_name, class_number) from entry details so we never create entries with class_id = NULL (no "Unknown Class").
 
     **Input (request):**
         - entry_details: List of entry-detail dicts (entry, classes, entry_riders).
         - rings_data: Ring list from schedule (for ring_number → ring_name).
         - show_uuid: Show UUID.
         - ring_number_to_event_id: Map from ring number to event UUID.
-        - api_class_id_to_class_id: Map from API class id to class UUID.
+        - name_class_number_to_class_id: Map (class_name, class_number) -> class UUID (from get_or_create_class_map_from_entry_details).
         - sync_date: Optional date for the show day; used as scheduled_date for entries with no class.
 
     **Output (response):**
@@ -484,7 +540,7 @@ def build_entry_rows_and_collect_entities(
         - rider_names: Set of rider names seen.
         - time_ring_list: List of (estimated_start_utc_str, ring_name) for first/last class summary.
 
-    **What it does:** Iterates entry_details and each entry's classes; builds one row per (entry, class); for entries with no classes, builds one row with status INACTIVE and event_id/class_id/api_class_id null. Collects horse/rider names and (time, ring_name).
+    **What it does:** Iterates entry_details and each entry's classes; resolves class_id by (name, class_number); builds one row per (entry, class) only when class is found; for entries with no classes, builds one row with status INACTIVE. Collects horse/rider names and (time, ring_name).
     """
     horse_names: Set[str] = set()
     rider_names: Set[str] = set()
@@ -531,12 +587,14 @@ def build_entry_rows_and_collect_entities(
             )
             if estimated_start and ring_name:
                 time_ring_list.append((estimated_start, ring_name))
+            class_name = (cl.get("name") or "").strip()
+            class_number = _normalize_class_number(cl.get("class_number"))
+            if not class_name:
+                continue
+            class_uuid = name_class_number_to_class_id.get((class_name, class_number))
+            if class_uuid is None:
+                continue
             api_class_id = cl.get("class_id")
-            class_uuid = (
-                api_class_id_to_class_id.get(api_class_id)
-                if api_class_id is not None
-                else None
-            )
             event_uuid = (
                 ring_number_to_event_id.get(ring_num) if ring_num is not None else None
             )
@@ -818,6 +876,9 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
             entry_details_fetched = len(entry_details)
             print("[Flow 1] Entry details fetched | count=%s" % entry_details_fetched)
 
+            name_class_number_to_class_id = await get_or_create_class_map_from_entry_details(
+                session, farm_id, entry_details
+            )
             (
                 entry_rows,
                 horse_names,
@@ -828,7 +889,7 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                 rings_data,
                 show_uuid,
                 ring_number_to_event_id,
-                api_class_id_to_class_id,
+                name_class_number_to_class_id,
                 sync_date=_sync_date,
             )
             entry_rows_built = len(entry_rows)
@@ -895,18 +956,18 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                 sync_date_str,
                 show_name,
                 len(horse_names),
-                len(api_class_id_to_class_id),  # distinct classes (rows in classes table)
-                total_synced_entries,           # horse+class rows (rows in entries table)
+                len(name_class_number_to_class_id),  # distinct classes used for entries
+                total_synced_entries,                # horse+class rows (rows in entries table)
                 time_ring_list,
                 counts=counts,
             )
 
             await session.commit()
-            print("[Flow 1] Done | show=%s classes=%s entries=%s horses=%s" % (show_name, len(api_class_id_to_class_id), total_synced_entries, len(horse_names)))
+            print("[Flow 1] Done | show=%s classes=%s entries=%s horses=%s" % (show_name, len(name_class_number_to_class_id), total_synced_entries, len(horse_names)))
             logger.info(
                 "Flow 1 complete: show=%s classes=%s entries=%s horses=%s",
                 show_name,
-                len(api_class_id_to_class_id),
+                len(name_class_number_to_class_id),
                 total_synced_entries,
                 len(horse_names),
             )

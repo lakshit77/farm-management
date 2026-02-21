@@ -15,17 +15,20 @@ from sqlalchemy import (
     Numeric,
     String,
     and_,
+    func,
+    or_,
     select,
     text,
     tuple_,
 )
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, selectinload
 
 from app.core.database import Base
-from app.core.enums import EntryStatus
+from app.core.enums import ClassStatus, EntryStatus
 from app.models.base import ts_created, ts_updated, uuid_pk
+from app.models.show import Show
 
 
 class Entry(Base):
@@ -230,3 +233,163 @@ async def bulk_upsert_entries(
         await session.execute(stmt_no)
 
     return inserted_total, updated_total
+
+
+async def count_entries_for_farm_on_date(
+    session: AsyncSession,
+    farm_id: uuid.UUID,
+    scheduled_date: date,
+) -> int:
+    """
+    Return the number of entries for the given farm and scheduled date.
+
+    Used to check whether Flow 1 (daily schedule) has run for a date before
+    running Flow 2 (class monitoring). Joins Entry to Show to filter by farm_id.
+
+    **Input (request):**
+        - session: AsyncSession (caller-owned).
+        - farm_id: Farm UUID.
+        - scheduled_date: Date to filter (Entry.scheduled_date).
+
+    **Output (response):**
+        - Count of entries (>= 0).
+    """
+    stmt = (
+        select(func.count(Entry.id))
+        .join(Show, Entry.show_id == Show.id)
+        .where(and_(Show.farm_id == farm_id, Entry.scheduled_date == scheduled_date))
+    )
+    result = await session.execute(stmt)
+    return result.scalar() or 0
+
+
+async def get_active_entries_for_farm_on_date(
+    session: AsyncSession,
+    farm_id: uuid.UUID,
+    scheduled_date: date,
+) -> List[Entry]:
+    """
+    Return entries for the given farm and date that are active (api_class_id set,
+    class not completed), with horse, show_class, event, and show loaded.
+
+    Used by Flow 2 (class monitoring) to get active classes and entries. Caller
+    groups by (api_class_id, show_id) and dedupes.
+
+    **Input (request):**
+        - session: AsyncSession (caller-owned).
+        - farm_id: Farm UUID.
+        - scheduled_date: Date to filter (Entry.scheduled_date).
+
+    **Output (response):**
+        - List of Entry instances with relations loaded.
+    """
+    stmt = (
+        select(Entry)
+        .join(Show, Entry.show_id == Show.id)
+        .where(
+            and_(
+                Show.farm_id == farm_id,
+                Entry.scheduled_date == scheduled_date,
+                Entry.api_class_id.isnot(None),
+                or_(
+                    Entry.class_status.is_(None),
+                    Entry.class_status != ClassStatus.COMPLETED.value,
+                ),
+            )
+        )
+        .options(
+            selectinload(Entry.horse),
+            selectinload(Entry.show_class),
+            selectinload(Entry.event),
+            selectinload(Entry.show),
+        )
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().unique().all())
+
+
+async def get_entries_for_farm_on_date(
+    session: AsyncSession,
+    farm_id: uuid.UUID,
+    scheduled_date: date,
+) -> List[Entry]:
+    """
+    Return all entries for the given farm and scheduled date, with horse, rider,
+    event, show_class, and show loaded.
+
+    Used by schedule view to build nested events → classes → entries. Caller
+    may filter by horse_name/class_name and build the view structure.
+
+    **Input (request):**
+        - session: AsyncSession (caller-owned).
+        - farm_id: Farm UUID.
+        - scheduled_date: Date to filter (Entry.scheduled_date).
+
+    **Output (response):**
+        - List of Entry instances with relations loaded.
+    """
+    stmt = (
+        select(Entry)
+        .join(Show, Entry.show_id == Show.id)
+        .where(
+            and_(
+                Show.farm_id == farm_id,
+                Entry.scheduled_date == scheduled_date,
+            )
+        )
+        .options(
+            selectinload(Entry.horse),
+            selectinload(Entry.rider),
+            selectinload(Entry.event),
+            selectinload(Entry.show_class),
+            selectinload(Entry.show),
+        )
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().unique().all())
+
+
+async def get_horse_remaining_entries_today(
+    session: AsyncSession,
+    horse_id: uuid.UUID,
+    show_id: uuid.UUID,
+    completed_entry_id: uuid.UUID,
+    scheduled_date: date,
+) -> List[Entry]:
+    """
+    Return the horse's remaining entries for the given show and date: not the
+    completed entry, not gone in, class not completed, ordered by estimated_start.
+
+    Used by Flow 3 (horse availability) to compute next class and free time.
+
+    **Input (request):**
+        - session: AsyncSession (caller-owned).
+        - horse_id: Horse UUID.
+        - show_id: Show UUID.
+        - completed_entry_id: Entry UUID to exclude (just completed).
+        - scheduled_date: Date to filter (Entry.scheduled_date).
+
+    **Output (response):**
+        - List of Entry instances with show_class and event loaded, ordered by estimated_start.
+    """
+    stmt = (
+        select(Entry)
+        .where(
+            Entry.horse_id == horse_id,
+            Entry.show_id == show_id,
+            Entry.scheduled_date == scheduled_date,
+            Entry.id != completed_entry_id,
+            Entry.gone_in.is_(False),
+            or_(
+                Entry.class_status.is_(None),
+                Entry.class_status != ClassStatus.COMPLETED.value,
+            ),
+        )
+        .order_by(Entry.estimated_start.asc().nulls_last())
+        .options(
+            selectinload(Entry.show_class),
+            selectinload(Entry.event),
+        )
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().unique().all())

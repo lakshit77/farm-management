@@ -7,15 +7,16 @@ Callers pass an existing session so logs are written in the same transaction as 
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time
+from datetime import date
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.models.notification_log import NotificationLog
+from app.models.notification_log import (
+    NotificationLog,
+    get_recent_notifications as fetch_recent_notifications_from_db,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,35 +87,16 @@ async def get_recent_notifications(
     **Output (response):**
         - List of NotificationLog instances ordered by created_at DESC.
     """
-    stmt = (
-        select(NotificationLog)
-        .where(NotificationLog.farm_id == farm_id)
-        .order_by(NotificationLog.created_at.desc())
-        .offset(offset)
-        .limit(limit)
+    rows = await fetch_recent_notifications_from_db(
+        session,
+        farm_id=farm_id,
+        limit=limit,
+        offset=offset,
+        source=source,
+        notification_type=notification_type,
+        date_filter=date_filter,
+        load_entry_relations=(horse_name is not None or class_name is not None),
     )
-    if source is not None:
-        stmt = stmt.where(NotificationLog.source == source)
-    if notification_type is not None:
-        stmt = stmt.where(NotificationLog.notification_type == notification_type)
-    if date_filter is not None:
-        start_of_day = datetime.combine(date_filter, time.min)
-        end_of_day = datetime.combine(date_filter, time(23, 59, 59, 999999))
-        stmt = stmt.where(
-            NotificationLog.created_at >= start_of_day,
-            NotificationLog.created_at <= end_of_day,
-        )
-    # Load entry with horse/class relations when name filters are requested
-    if horse_name is not None or class_name is not None:
-        from app.models.entry import Entry  # noqa: PLC0415 — avoid circular at module level
-        from app.models.horse import Horse  # noqa: PLC0415
-        from app.models.show_class import ShowClass  # noqa: PLC0415
-        stmt = stmt.options(
-            selectinload(NotificationLog.entry).selectinload(Entry.horse),
-            selectinload(NotificationLog.entry).selectinload(Entry.show_class),
-        )
-    result = await session.execute(stmt)
-    rows = list(result.scalars().unique().all())
     # Post-filter by horse/class name through the entry relationship
     if horse_name is not None:
         hn_lower = horse_name.strip().lower()

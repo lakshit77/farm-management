@@ -6,13 +6,11 @@ with horse, rider, and backend status for the front-end.
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.constants import CUSTOMER_ID, FARM_NAME
 from app.core.enums import EntryStatus
-from app.models.entry import Entry
+from app.models.entry import Entry, get_entries_for_farm_on_date
 from app.services.class_monitoring_last_run import format_last_run_at_for_display
 from app.models.event import Event
 from app.models.farm import get_farm_by_name_and_customer
@@ -115,25 +113,7 @@ async def get_schedule_view(
         return ScheduleViewData(date=view_date.isoformat(), events=[], class_monitoring_last_run=None)
 
     # Load all entries for this date with show.farm_id = farm.id, and relations
-    stmt = (
-        select(Entry)
-        .join(Show, Entry.show_id == Show.id)
-        .where(
-            and_(
-                Show.farm_id == farm.id,
-                Entry.scheduled_date == view_date,
-            )
-        )
-        .options(
-            selectinload(Entry.horse),
-            selectinload(Entry.rider),
-            selectinload(Entry.event),
-            selectinload(Entry.show_class),
-            selectinload(Entry.show),
-        )
-    )
-    result = await session.execute(stmt)
-    entries = list(result.scalars().unique())
+    entries = await get_entries_for_farm_on_date(session, farm.id, view_date)
 
     # Apply optional server-side filters after loading (avoids complex joins with selectinload)
     if horse_name:
