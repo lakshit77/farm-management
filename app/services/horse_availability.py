@@ -127,12 +127,19 @@ def _build_availability_message(
     order_total: Optional[int] = None,
     free_hours: Optional[int] = None,
     free_mins: Optional[int] = None,
+    faults: Any = None,
+    time_s: Any = None,
 ) -> str:
     """
     Build the availability message (same format as Telegram template in FLOWS.md).
 
-    Stored in notification_log.message instead of being sent via Telegram.
+    Includes trip result (faults/time) when provided. Stored in notification_log.message
+    instead of being sent via Telegram.
     """
+    f_val = faults if faults is not None else "—"
+    t_val = time_s if time_s is not None else "—"
+    trip_line = f"📊 Faults: {f_val} | Time: {t_val}s\n"
+
     if has_next and next_class_name:
         order_str = (
             f"#{order_of_go} of {order_total}"
@@ -147,7 +154,8 @@ def _build_availability_message(
         return (
             f"🐴 {horse_name} - Trip Completed\n\n"
             f"✅ Finished: {completed_class_name}\n"
-            f"📍 Ring: {completed_ring_name}\n\n"
+            f"📍 Ring: {completed_ring_name}\n"
+            f"{trip_line}\n"
             f"⏭️ Next: {next_class_name}\n"
             f"⏰ Time: {next_class_time or '—'}\n"
             f"📍 Ring: {next_ring_name or '—'}\n"
@@ -157,7 +165,8 @@ def _build_availability_message(
     return (
         f"🐴 {horse_name} - Done for Today!\n\n"
         f"✅ Finished: {completed_class_name}\n"
-        f"📍 Ring: {completed_ring_name}\n\n"
+        f"📍 Ring: {completed_ring_name}\n"
+        f"{trip_line}\n"
         "🎉 No more classes scheduled today"
     )
 
@@ -172,11 +181,15 @@ async def run_flow_3_horse_availability(
     show_id: UUID,
     completed_class_name: str,
     completed_ring_name: str,
+    faults: Any = None,
+    time_s: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Execute Flow 3: calculate free time, build message, log to notification_log.
 
-    Does not send Telegram; the message is stored in notification_log.
+    Produces a single merged notification (source: horse_availability) that includes
+    trip result data (faults, time) alongside the availability information. Does not
+    send Telegram; the message is stored in notification_log.
 
     **Input (request):**
         - session: AsyncSession (caller-owned; same transaction as Flow 2 updates).
@@ -188,9 +201,11 @@ async def run_flow_3_horse_availability(
         - show_id: Show UUID.
         - completed_class_name: Class name for message.
         - completed_ring_name: Ring name for message.
+        - faults: Faults value from the completed trip (faults_one), if available.
+        - time_s: Time value from the completed trip (time_one), if available.
 
     **Output (response):**
-        - Dict with keys: has_next, free_hours, free_mins, next_class_name, etc. (for logging/debug).
+        - Dict with keys: has_next, free_hours, free_mins, next_class_name, faults, time_s, etc.
         - None if an error occurs.
     """
     today = datetime.now(timezone.utc).date()
@@ -260,6 +275,8 @@ async def run_flow_3_horse_availability(
         order_total=order_total,
         free_hours=free_hours,
         free_mins=free_mins,
+        faults=faults,
+        time_s=time_s,
     )
 
     payload: Dict[str, Any] = {
@@ -271,6 +288,8 @@ async def run_flow_3_horse_availability(
         "has_next": has_next,
         "free_hours": free_hours,
         "free_mins": free_mins,
+        "faults": faults,
+        "time_s": time_s,
     }
     if has_next:
         payload["next_class_name"] = next_class_name

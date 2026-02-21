@@ -80,7 +80,7 @@ async def get_recent_notifications(
         - offset: Number of rows to skip (default 0), for pagination.
         - source: Optional filter (e.g. "class_monitoring").
         - notification_type: Optional filter (e.g. "STATUS_CHANGE").
-        - date_filter: Optional single date; only rows with created_at on that day (00:00:00–23:59:59).
+        - date_filter: Optional single date; that day is interpreted in venue timezone (see model).
         - horse_name: Optional case-insensitive partial match on the associated entry's horse name.
         - class_name: Optional case-insensitive partial match on the associated entry's class name.
 

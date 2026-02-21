@@ -56,12 +56,15 @@ async def trigger_flow_3_if_needed(
     show_id: Any,
     completed_class_name: str,
     completed_ring_name: str,
+    faults: Any = None,
+    time_s: Any = None,
 ) -> None:
     """
     Trigger Flow 3 (Horse Availability) when a horse completes a trip (gone_in 0→1).
 
-    Calculates free time and next class, logs availability message to notification_log.
-    Does not send Telegram; message is stored in notification_log.
+    Calculates free time and next class, logs a single merged availability notification
+    to notification_log (source: horse_availability). Faults and time from the completed
+    trip are forwarded so the log entry is self-contained.
 
     **Input (request):**
         - session: AsyncSession (caller-owned; same transaction as entry updates).
@@ -73,6 +76,8 @@ async def trigger_flow_3_if_needed(
         - show_id: Current show UUID.
         - completed_class_name: Class name for message.
         - completed_ring_name: Ring name for message.
+        - faults: Faults value from the completed trip (faults_one), if available.
+        - time_s: Time value from the completed trip (time_one), if available.
     """
     if not farm_id:
         logger.warning("Flow 3: skipping (no farm_id)")
@@ -87,6 +92,8 @@ async def trigger_flow_3_if_needed(
         show_id=show_id,
         completed_class_name=completed_class_name,
         completed_ring_name=completed_ring_name,
+        faults=faults,
+        time_s=time_s,
     )
 
 
@@ -294,19 +301,6 @@ def _format_alert_result(change: Dict[str, Any]) -> str:
         f"💰 Prize: ${prize}"
     )
 
-
-def _format_alert_horse_completed(change: Dict[str, Any], faults: Any = None, time_s: Any = None) -> str:
-    """Build HORSE_COMPLETED alert message. faults and time_s can come from trip if needed."""
-    horse = change.get("horse") or "Unknown"
-    class_name = change.get("class_name") or "Unknown Class"
-    f_val = faults if faults is not None else "—"
-    t_val = time_s if time_s is not None else "—"
-    return (
-        "✅ Trip Completed\n\n"
-        f"🐴 {horse}\n"
-        f"📋 {class_name}\n"
-        f"📊 Faults: {f_val} | Time: {t_val}s"
-    )
 
 
 def _format_alert_scratched(change: Dict[str, Any]) -> str:
@@ -556,31 +550,11 @@ async def _process_one_class_with_data(
 
         # Horse completed trip
         if gone_in and not entry.gone_in:
-            ch = {
-                "type": NotificationType.HORSE_COMPLETED.value,
-                "horse": horse_name,
-                "horse_id": str(entry.horse_id),
-                "class_name": class_name,
-            }
-            changes.append(ch)
             faults = trip.get("faults_one")
             time_one = trip.get("time_one")
-            horse_completed_msg = _format_alert_horse_completed(ch, faults=faults, time_s=time_one)
-            alerts.append({
-                "type": NotificationType.HORSE_COMPLETED.value,
-                "message": horse_completed_msg,
-            })
-            if farm_id is not None:
-                await log_notification(
-                    session,
-                    farm_id=farm_id,
-                    source=NotificationSource.CLASS_MONITORING.value,
-                    notification_type=NotificationType.HORSE_COMPLETED.value,
-                    message=horse_completed_msg,
-                    payload=ch,
-                    entry_id=entry.id,
-                )
-            # Step 7: trigger Flow 3 (Horse Availability) when horse completes
+            # Step 7: trigger Flow 3 (Horse Availability) when horse completes.
+            # Faults and time are passed through so Flow 3 can include them in its log entry
+            # instead of creating a separate class_monitoring HORSE_COMPLETED log.
             if entry.show_id and entry.class_id:
                 await trigger_flow_3_if_needed(
                     session=session,
@@ -592,6 +566,8 @@ async def _process_one_class_with_data(
                     show_id=entry.show_id,
                     completed_class_name=class_name,
                     completed_ring_name=ring_name,
+                    faults=faults,
+                    time_s=time_one,
                 )
 
         # Horse scratched
