@@ -418,8 +418,11 @@ async def _process_one_class_with_data(
         return 0, [], []
 
     first = entries[0]
+    if not first.show_class:
+        return 0, [], []
+
     farm_id = first.show.farm_id if first.show else None
-    class_name = (first.show_class.name if first.show_class else None) or "Unknown Class"
+    class_name = first.show_class.name or "Unknown Class"
     ring_name = (first.event.name if first.event else None) or "Unknown Ring"
     crd = class_data.get("class_related_data") or {}
     trips = class_data.get("trips") or []
