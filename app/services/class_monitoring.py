@@ -515,11 +515,22 @@ async def _process_one_class_with_data(
                 entry_id=first.id,
             )
 
-    # ---------- Entry-level: match trips and detect changes ----------
+    # ---------- Entry-level: class-level updates for every entry, trip-specific when trip exists ----------
     updated = 0
     for entry in entries:
+        # Class-level updates for every entry (so entries without a matching trip still get updated)
+        entry.class_status = api_status
+        entry.estimated_start = normalized_estimated or api_estimated
+        entry.actual_start = normalized_actual or api_actual
+        entry.total_trips = api_total_trips
+        entry.completed_trips = api_completed_trips
+        entry.remaining_trips = api_remaining_trips
+        entry.updated_at = datetime.now(timezone.utc)
+
         trip = _trip_for_entry(trips, entry.api_entry_id)
         if trip is None:
+            session.add(entry)
+            updated += 1
             continue
 
         gone_in = (trip.get("gone_in") == 1)
@@ -594,13 +605,7 @@ async def _process_one_class_with_data(
                     entry_id=entry.id,
                 )
 
-        # ---------- Update entry (Step 5) ----------
-        entry.class_status = api_status
-        entry.estimated_start = normalized_estimated or api_estimated
-        entry.actual_start = normalized_actual or api_actual
-        entry.total_trips = api_total_trips
-        entry.completed_trips = api_completed_trips
-        entry.remaining_trips = api_remaining_trips
+        # ---------- Update entry: trip-specific fields (class-level already set above) ----------
         entry.api_trip_id = _safe_int(trip.get("trip_id"))
         entry.order_of_go = _safe_int(trip.get("order_of_go"))
         entry.placing = placing

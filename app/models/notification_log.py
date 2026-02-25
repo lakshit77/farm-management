@@ -7,7 +7,7 @@ from datetime import date, datetime, time, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import ForeignKey, String, Text, select
+from sqlalchemy import ForeignKey, String, Text, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column, relationship, selectinload
@@ -79,8 +79,10 @@ async def get_recent_notifications(
         - offset: Number of rows to skip (default 0), for pagination.
         - source: Optional filter (e.g. "class_monitoring").
         - notification_type: Optional filter (e.g. "STATUS_CHANGE").
-        - date_filter: Optional single date; that calendar day is interpreted in VENUE_TIMEZONE
-          and converted to UTC for comparison with created_at (so "today" matches the venue day).
+        - date_filter: Optional single date. When set, notifications are filtered by
+          *schedule day*: for rows with entry_id, the linked entry's scheduled_date must
+          equal date_filter (so class monitoring run for Feb 22 shows under Feb 22);
+          for rows without entry_id, created_at is matched to that day in VENUE_TIMEZONE.
         - load_entry_relations: If True, load entry.horse and entry.show_class.
 
     **Output (response):**
@@ -98,17 +100,22 @@ async def get_recent_notifications(
     if notification_type is not None:
         stmt = stmt.where(NotificationLog.notification_type == notification_type)
     if date_filter is not None:
-        # Interpret the date as the calendar day in the venue timezone so "today"
-        # matches notifications from that day in the venue (e.g. America/New_York).
-        # created_at is stored in UTC; convert venue-day bounds to UTC for the query.
+        # Filter by schedule day: notifications with an entry use the entry's
+        # scheduled_date (so class monitoring for Feb 22 appears under Feb 22);
+        # notifications without an entry use created_at in venue-timezone day.
         venue_tz = ZoneInfo(get_settings().VENUE_TIMEZONE)
         start_venue = datetime.combine(date_filter, time.min).replace(tzinfo=venue_tz)
         end_venue = datetime.combine(date_filter, time(23, 59, 59, 999999)).replace(tzinfo=venue_tz)
         start_utc = start_venue.astimezone(timezone.utc)
         end_utc = end_venue.astimezone(timezone.utc)
+        stmt = stmt.outerjoin(Entry, NotificationLog.entry_id == Entry.id)
         stmt = stmt.where(
-            NotificationLog.created_at >= start_utc,
-            NotificationLog.created_at <= end_utc,
+            or_(
+                (NotificationLog.entry_id.isnot(None)) & (Entry.scheduled_date == date_filter),
+                (NotificationLog.entry_id.is_(None))
+                & (NotificationLog.created_at >= start_utc)
+                & (NotificationLog.created_at <= end_utc),
+            )
         )
     if load_entry_relations:
         stmt = stmt.options(
