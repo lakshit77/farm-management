@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import CUSTOMER_ID, FARM_NAME
 from app.core.database import AsyncSessionLocal
 from app.core.enums import EntryStatus, ScheduleTaskResult, ScheduleTriggerType
-from app.models.entry import bulk_upsert_entries
+from app.models.entry import bulk_upsert_entries, delete_stale_entries
 from app.models.event import bulk_upsert_events, get_events_by_farm_for_rings
 from app.models.farm import Farm, create_farm, get_farm_by_name_and_customer
 from app.models.horse import bulk_upsert_horses, get_horse_ids_by_names
@@ -61,6 +61,7 @@ class _EntryCounts(TypedDict, total=False):
     entry_rows_built: int
     inserted: int
     updated: int
+    deleted: int
 
 
 def _entity_counts(
@@ -78,6 +79,7 @@ def _entry_counts(
     entry_rows_built: int = 0,
     inserted: int = 0,
     updated: int = 0,
+    deleted: int = 0,
 ) -> _EntryCounts:
     """Build entry-stage counts for summary."""
     return {
@@ -86,6 +88,7 @@ def _entry_counts(
         "entry_rows_built": entry_rows_built,
         "inserted": inserted,
         "updated": updated,
+        "deleted": deleted,
     }
 
 
@@ -148,6 +151,33 @@ def _estimated_start_utc(
         return None
     dt = datetime(d.year, d.month, d.day, h, m, s, tzinfo=timezone.utc)
     return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# -----------------------------------------------------------------------------
+# Private helpers (ring completion check)
+# -----------------------------------------------------------------------------
+
+
+def _all_rings_complete(rings_data: List[dict]) -> bool:
+    """
+    Return True if every ring in rings_data has a ring_status of "ring complete" (case-insensitive).
+
+    **Input (request):**
+        - rings_data: List of ring dicts from the schedule API response. Each dict is expected
+          to contain a "ring_status" key.
+
+    **Output (response):**
+        - bool: True when all rings are complete (or rings_data is empty), False otherwise.
+
+    **What it does:** Iterates over each ring and checks whether its ``ring_status`` value,
+    stripped and lowercased, equals ``"ring complete"``. Returns False as soon as any ring
+    that is *not* complete is found; returns True only when all rings pass the check.
+    """
+    for ring in rings_data:
+        status = (ring.get("ring_status") or "").strip().lower()
+        if status != "ring complete":
+            return False
+    return True
 
 
 # -----------------------------------------------------------------------------
@@ -519,7 +549,7 @@ def build_entry_rows_and_collect_entities(
     show_uuid: Any,
     ring_number_to_event_id: Dict[int, Any],
     name_class_number_to_class_id: Dict[Tuple[str, Optional[str]], Any],
-    sync_date: Optional[date] = None,
+    sync_date: date,
 ) -> Tuple[List[Dict[str, Any]], Set[str], Set[str], List[Tuple[str, str]]]:
     """
     From entry details, build DB entry rows (with _horse_name / _rider_name placeholders) and collect unique horses, riders, and (time, ring_name) for summary.
@@ -532,7 +562,7 @@ def build_entry_rows_and_collect_entities(
         - show_uuid: Show UUID.
         - ring_number_to_event_id: Map from ring number to event UUID.
         - name_class_number_to_class_id: Map (class_name, class_number) -> class UUID (from get_or_create_class_map_from_entry_details).
-        - sync_date: Optional date for the show day; used as scheduled_date for entries with no class.
+        - sync_date: The show day being synced (required). Used to decide ACTIVE vs INACTIVE per class row and as scheduled_date for entries with no class.
 
     **Output (response):**
         - entry_rows: List of dicts suitable for bulk_upsert_entries; each has _horse_name and _rider_name (to be resolved to UUIDs later).
@@ -540,7 +570,7 @@ def build_entry_rows_and_collect_entities(
         - rider_names: Set of rider names seen.
         - time_ring_list: List of (estimated_start_utc_str, ring_name) for first/last class summary.
 
-    **What it does:** Iterates entry_details and each entry's classes; resolves class_id by (name, class_number); builds one row per (entry, class) only when class is found; for entries with no classes, builds one row with status INACTIVE. Collects horse/rider names and (time, ring_name).
+    **What it does:** Iterates entry_details and each entry's classes; resolves class_id by (name, class_number); builds one row per (entry, class). If the class scheduled_date equals sync_date the row is ACTIVE, otherwise INACTIVE (horse still recorded). For entries with no classes at all, one INACTIVE row is added. Collects horse/rider names and (time, ring_name).
     """
     horse_names: Set[str] = set()
     rider_names: Set[str] = set()
@@ -599,6 +629,11 @@ def build_entry_rows_and_collect_entities(
                 ring_number_to_event_id.get(ring_num) if ring_num is not None else None
             )
             sdate = _parse_date(scheduled_date_str)
+            # Classes whose scheduled_date matches sync_date are ACTIVE; all others
+            # are still appended but as INACTIVE so the horse remains in the entries table.
+            row_status = (
+                EntryStatus.ACTIVE.value if sdate == sync_date else EntryStatus.INACTIVE.value
+            )
             entry_rows.append({
                 "horse_id": None,
                 "rider_id": None,
@@ -614,12 +649,12 @@ def build_entry_rows_and_collect_entities(
                 "back_number": back_number,
                 "scheduled_date": sdate,
                 "estimated_start": estimated_start,
-                "status": EntryStatus.ACTIVE.value,
+                "status": row_status,
                 "class_status": None,
                 "_horse_name": horse_name,
                 "_rider_name": rn or default_rider,
             })
-        # If this entry has no classes, add one row with status INACTIVE so the horse appears in entries table
+        # If this entry has no classes, add one INACTIVE row so the horse still appears in the entries table.
         if not classes_list and horse_name:
             entry_rows.append({
                 "horse_id": None,
@@ -712,9 +747,10 @@ async def resolve_entry_rows_and_upsert(
     entry_rows: List[Dict[str, Any]],
     horse_name_to_id: Dict[str, Any],
     rider_name_to_id: Dict[str, Any],
-) -> Tuple[int, int, int]:
+) -> Tuple[int, int, int, int]:
     """
-    Replace _horse_name / _rider_name in entry rows with UUIDs, drop invalid rows, and bulk upsert entries.
+    Resolve horse/rider names to UUIDs, drop invalid rows, upsert entries, then
+    delete stale entries that are no longer present on the official source.
 
     **Input (request):**
         - session: AsyncSession.
@@ -726,8 +762,13 @@ async def resolve_entry_rows_and_upsert(
         - total_upserted: Number of entry rows actually upserted (after dropping rows with no horse_id).
         - entries_inserted: Number of entry rows newly inserted.
         - entries_updated: Number of entry rows updated.
+        - entries_deleted: Number of stale entry rows deleted (no longer on the official source).
 
-    **What it does:** Pops _horse_name / _rider_name, sets horse_id and rider_id from maps; filters out rows with no horse_id; calls bulk_upsert_entries.
+    **What it does:**
+        1. Pops _horse_name / _rider_name and resolves them to UUIDs via the provided maps.
+        2. Filters out rows with no resolved horse_id.
+        3. Calls bulk_upsert_entries to insert/update the valid rows.
+        4. Calls delete_stale_entries to remove DB entries absent from the current batch.
     """
     for row in entry_rows:
         row["horse_id"] = horse_name_to_id.get(row.pop("_horse_name", "") or "")
@@ -736,12 +777,13 @@ async def resolve_entry_rows_and_upsert(
         if row["horse_id"] is None and horse_name_to_id:
             row["horse_id"] = next(iter(horse_name_to_id.values()))
     valid_rows = [r for r in entry_rows if r.get("horse_id") is not None]
-    entries_inserted, entries_updated = 0, 0
+
+    entries_inserted, entries_updated, entries_deleted = 0, 0, 0
     if valid_rows:
-        entries_inserted, entries_updated = await bulk_upsert_entries(
-            session, valid_rows
-        )
-    return len(valid_rows), entries_inserted, entries_updated
+        entries_inserted, entries_updated = await bulk_upsert_entries(session, valid_rows)
+        entries_deleted = await delete_stale_entries(session, valid_rows)
+
+    return len(valid_rows), entries_inserted, entries_updated, entries_deleted
 
 
 # -----------------------------------------------------------------------------
@@ -845,6 +887,21 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
             )
             print("[Flow 1] Schedule fetched | show=%s" % show_name)
 
+            if _all_rings_complete(rings_data):
+                await session.commit()
+                msg = "All rings are completed. No further processing needed."
+                print("[Flow 1] %s" % msg)
+                logger.info("Flow 1 early exit: %s | show=%s date=%s", msg, show_name, sync_date_str)
+                return {
+                    "task": ScheduleTaskResult.COMPLETED.value,
+                    "trigger": ScheduleTriggerType.DAILY.value,
+                    "message": msg,
+                    "summary": {
+                        "date": sync_date_str,
+                        "show_name": show_name,
+                    },
+                }
+
             (
                 ring_number_to_event_id,
                 events_inserted,
@@ -913,10 +970,11 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                 total_synced_entries,
                 entries_inserted,
                 entries_updated,
+                entries_deleted,
             ) = await resolve_entry_rows_and_upsert(
                 session, entry_rows, horse_name_to_id, rider_name_to_id
             )
-            print("[Flow 1] Entries upserted | from_api=%s details_fetched=%s rows_built=%s inserted=%s updated=%s" % (entries_from_api, entry_details_fetched, entry_rows_built, entries_inserted, entries_updated))
+            print("[Flow 1] Entries upserted | from_api=%s details_fetched=%s rows_built=%s inserted=%s updated=%s deleted=%s" % (entries_from_api, entry_details_fetched, entry_rows_built, entries_inserted, entries_updated, entries_deleted))
 
             counts: Dict[str, Any] = {
                 "show": {
@@ -950,6 +1008,7 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                     entry_rows_built=entry_rows_built,
                     inserted=entries_inserted,
                     updated=entries_updated,
+                    deleted=entries_deleted,
                 ),
             }
             summary = build_summary(

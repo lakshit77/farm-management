@@ -15,6 +15,7 @@ from sqlalchemy import (
     Numeric,
     String,
     and_,
+    delete,
     func,
     or_,
     select,
@@ -160,15 +161,23 @@ async def bulk_upsert_entries(
     rows: List[Dict[str, Any]],
 ) -> Tuple[int, int]:
     """
-    Bulk insert/update entries. Each dict has horse_id, rider_id, show_id, event_id,
-    class_id, api_entry_id, api_horse_id, api_rider_id, api_class_id, api_ring_id,
-    api_trainer_id, back_number, scheduled_date, estimated_start (and optional status/class_status).
+    Bulk insert/update entries. Responsible solely for upsert (insert + update).
+
+    Each dict must contain horse_id, rider_id, show_id, event_id, class_id,
+    api_entry_id, api_horse_id, api_rider_id, api_class_id, api_ring_id,
+    api_trainer_id, back_number, scheduled_date, estimated_start (and optional
+    status/class_status).
 
     Rows with api_class_id set are upserted on (horse_id, show_id, api_class_id).
-    Rows with api_class_id null (no-class / inactive entries) are upserted on (horse_id, show_id).
+    Rows with api_class_id null (no-class / inactive entries) are upserted on
+    (horse_id, show_id).
+
+    Args:
+        session: Caller-owned async database session.
+        rows: List of entry data dicts to upsert.
 
     Returns:
-        (inserted_count, updated_count). Combined counts across both passes.
+        Tuple of (inserted_count, updated_count).
     """
     if not rows:
         return 0, 0
@@ -233,6 +242,87 @@ async def bulk_upsert_entries(
         await session.execute(stmt_no)
 
     return inserted_total, updated_total
+
+
+async def delete_stale_entries(
+    session: AsyncSession,
+    rows: List[Dict[str, Any]],
+) -> int:
+    """
+    Delete entries that exist in the DB for the covered (show_id, scheduled_date)
+    pairs but are absent from ``rows``.
+
+    Called after ``bulk_upsert_entries`` to remove entries that were present in a
+    previous sync but have since been removed from the official source.
+
+    The covered window is derived from the unique (show_id, scheduled_date) pairs
+    found in ``rows``. For each such pair, any DB entry whose
+    (horse_id, show_id, api_class_id) triple is not represented in ``rows`` is
+    considered stale and deleted.
+
+    Args:
+        session: Caller-owned async database session.
+        rows: The same list of valid entry dicts that was just upserted. Each dict
+            must contain horse_id, show_id, scheduled_date, and api_class_id (which
+            may be None).
+
+    Returns:
+        Number of stale entries deleted.
+    """
+    if not rows:
+        return 0
+
+    # Unique (show_id, scheduled_date) windows covered by this batch.
+    covered_pairs: set[Tuple[Any, Any]] = {
+        (r["show_id"], r["scheduled_date"])
+        for r in rows
+        if r.get("show_id") is not None and r.get("scheduled_date") is not None
+    }
+
+    if not covered_pairs:
+        return 0
+
+    # Surviving (horse_id, show_id, api_class_id) triples from the batch.
+    # api_class_id may be None for no-class rows.
+    surviving_keys: set[Tuple[Any, Any, Any]] = {
+        (r["horse_id"], r["show_id"], r.get("api_class_id"))
+        for r in rows
+    }
+
+    deleted_total = 0
+
+    for show_id, scheduled_date in covered_pairs:
+        # Surviving keys that belong to this show.
+        keys_for_show = [
+            (horse_id, sid, api_class_id)
+            for horse_id, sid, api_class_id in surviving_keys
+            if sid == show_id
+        ]
+
+        # Fetch all DB entries for this (show_id, scheduled_date).
+        fetch_stmt = select(
+            Entry.id, Entry.horse_id, Entry.show_id, Entry.api_class_id
+        ).where(
+            and_(
+                Entry.show_id == show_id,
+                Entry.scheduled_date == scheduled_date,
+            )
+        )
+        fetch_result = await session.execute(fetch_stmt)
+        db_rows = fetch_result.all()
+
+        stale_ids = [
+            row.id
+            for row in db_rows
+            if (row.horse_id, row.show_id, row.api_class_id) not in keys_for_show
+        ]
+
+        if stale_ids:
+            del_stmt = delete(Entry).where(Entry.id.in_(stale_ids))
+            del_result = await session.execute(del_stmt)
+            deleted_total += del_result.rowcount
+
+    return deleted_total
 
 
 async def count_entries_for_farm_on_date(
