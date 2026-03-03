@@ -55,6 +55,10 @@ def _get_cors_origins() -> list[str]:
     return _default_cors_origins
 
 
+# Middleware order matters: Starlette applies middleware LIFO (last added = outermost = runs first).
+# ApiKeyMiddleware must be added FIRST so CORSMiddleware is outermost and always attaches
+# Access-Control-Allow-Origin headers -- even on 401 responses from ApiKeyMiddleware.
+app.add_middleware(ApiKeyMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_get_cors_origins(),
@@ -63,7 +67,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
-app.add_middleware(ApiKeyMiddleware)
 
 app.include_router(api_router, prefix="/api/v1")
 
