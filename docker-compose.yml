@@ -1,6 +1,6 @@
 # Showground Live Monitoring API - Docker Compose for EC2 / local
 # Usage: docker compose up -d
-# API: https://wellington.aibolt.ai/api/v1 (via Caddy reverse proxy with automatic HTTPS)
+# API: https://api.aibolt.ai/api/v1 (via Caddy reverse proxy with automatic HTTPS)
 
 services:
   caddy:
