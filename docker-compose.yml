@@ -1,15 +1,30 @@
 # Showground Live Monitoring API - Docker Compose for EC2 / local
 # Usage: docker compose up -d
-# API: http://localhost:8000/api/v1 (or http://<EC2_PUBLIC_IP>:8000/api/v1)
+# API: https://wellington.aibolt.ai/api/v1 (via Caddy reverse proxy with automatic HTTPS)
 
 services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: showgroundlive-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
   api:
     build: .
     image: showgroundlive-api:latest
     container_name: showgroundlive-api
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     env_file:
       - .env
     # Optional: override or add env vars (e.g. for EC2)
@@ -21,3 +36,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+volumes:
+  caddy_data:
+  caddy_config:
