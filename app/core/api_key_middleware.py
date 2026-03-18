@@ -9,9 +9,14 @@ from starlette.responses import Response
 
 from app.core.config import get_settings
 
-# Paths that do not require the API key (exact match after normalizing trailing slash)
-# EXEMPT_PATHS = {"/api/v1/hello", "/api/v1/hello/"}
-EXEMPT_PATHS = {"/docs", "/openapi.json"}
+# Paths that do not require the API key (exact match after normalizing trailing slash).
+# The Stream Chat webhook uses its own HMAC-SHA256 signature for authentication,
+# so it must be exempt from the Bearer API key check.
+EXEMPT_PATHS = {
+    "/docs",
+    "/openapi.json",
+    "/api/v1/chat/webhook",
+}
 
 # 401 response body: status=0, message as per project API response format
 UNAUTHORIZED_MESSAGE = "Invalid or missing API key."

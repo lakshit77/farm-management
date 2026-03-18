@@ -36,6 +36,20 @@ class Settings(BaseSettings):
     # API returns times in venue local; we convert to UTC for free-time calculation.
     VENUE_TIMEZONE: str = "America/New_York"
 
+    # ── Stream Chat ────────────────────────────────────────────────────────────
+    STREAM_API_KEY: str = ""
+    STREAM_API_SECRET: str = ""
+
+    # Bot user IDs in Stream Chat (one per channel context)
+    STREAM_ALLTEAM_BOT_ID: str = "all-team-bot"
+    STREAM_ADMIN_BOT_ID: str = "admin-bot"
+    STREAM_PERSONAL_BOT_ID: str = "personal-bot"
+
+    # n8n webhook URLs — messages are forwarded here for AI processing
+    N8N_ALLTEAM_WEBHOOK_URL: str = ""
+    N8N_ADMIN_WEBHOOK_URL: str = ""
+    N8N_PERSONAL_WEBHOOK_URL: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

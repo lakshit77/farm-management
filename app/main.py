@@ -1,6 +1,8 @@
 """Application entry point and FastAPI app factory."""
 
+import logging
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -10,12 +12,41 @@ from app.core.api_key_middleware import ApiKeyMiddleware
 from app.core.config import get_settings
 from app.core.logging_config import setup_logging
 
+logger = logging.getLogger(__name__)
+
+
+def _upsert_stream_bots() -> None:
+    """Create / update the three bot users in Stream Chat on startup.
+
+    This is a no-op when STREAM_API_KEY is not configured so the app starts
+    cleanly in environments that have not yet set up Stream.
+    """
+    settings = get_settings()
+    if not settings.STREAM_API_KEY or not settings.STREAM_API_SECRET:
+        logger.info("Stream Chat not configured — skipping bot upsert")
+        return
+
+    try:
+        from app.core.stream_client import get_stream_client
+
+        client = get_stream_client()
+        client.upsert_users([
+            {"id": settings.STREAM_ALLTEAM_BOT_ID, "name": "Team Assistant", "role": "admin"},
+            {"id": settings.STREAM_ADMIN_BOT_ID, "name": "Admin Assistant", "role": "admin"},
+            {"id": settings.STREAM_PERSONAL_BOT_ID, "name": "Personal Assistant", "role": "admin"},
+        ])
+        logger.info("Stream Chat bot users upserted successfully")
+    except Exception as exc:
+        logger.warning("Failed to upsert Stream Chat bot users: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events (startup/shutdown)."""
     # Startup: configure logging (app.log + schedule_daily.log)
     setup_logging()
+    # Startup: ensure Stream Chat bot users exist
+    _upsert_stream_bots()
     yield
     # Shutdown
 
