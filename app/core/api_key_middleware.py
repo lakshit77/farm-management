@@ -12,11 +12,19 @@ from app.core.config import get_settings
 # Paths that do not require the API key (exact match after normalizing trailing slash).
 # The Stream Chat webhook uses its own HMAC-SHA256 signature for authentication,
 # so it must be exempt from the Bearer API key check.
+# Push endpoints use Supabase JWTs for auth (handled inside each endpoint),
+# so they are exempt from the API key check here.
 EXEMPT_PATHS = {
     "/docs",
     "/openapi.json",
     "/api/v1/chat/webhook",
 }
+
+# Path prefixes exempt from the API key check.
+# Any request whose path starts with one of these prefixes is allowed through.
+EXEMPT_PREFIXES = (
+    "/api/v1/push/",
+)
 
 # 401 response body: status=0, message as per project API response format
 UNAUTHORIZED_MESSAGE = "Invalid or missing API key."
@@ -25,7 +33,9 @@ UNAUTHORIZED_BODY = json.dumps({"status": 0, "message": UNAUTHORIZED_MESSAGE}).e
 
 def _path_exempt(path: str) -> bool:
     """Return True if the request path is exempt from API key check."""
-    return path in EXEMPT_PATHS
+    if path in EXEMPT_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in EXEMPT_PREFIXES)
 
 
 class ApiKeyMiddleware(BaseHTTPMiddleware):
