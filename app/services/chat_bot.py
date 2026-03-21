@@ -72,6 +72,7 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
     message: dict[str, Any] = event.get("message", {})
     message_id: str = message.get("id", "")
     message_text: str = message.get("text", "")
+    message_custom: dict[str, Any] = message.get("custom", {})
     author: dict[str, Any] = message.get("user", {})
     author_id: str = author.get("id", "")
     author_name: str = author.get("name", author_id)
@@ -141,20 +142,27 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
         "farm_id": farm_id,
         "message_id": message_id,
         "message_text": message_text,
+        # Forwarded verbatim so n8n can inspect action_reply on button clicks
+        # or any other custom metadata attached by the frontend.
+        "message_custom": message_custom,
         "user_id": author_id,
         "user_name": author_name,
         "mentioned_users": mentioned_users,
     }
 
     response_text: Optional[str] = None
+    response_custom: Optional[dict[str, Any]] = None
     try:
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.post(n8n_url, json=n8n_payload)
             resp.raise_for_status()
             data = resp.json()
-            # n8n should return { "text": "..." } or just a plain string
+            # n8n should return { "text": "...", "custom": {...} } or a plain string.
+            # The optional "custom" dict carries action buttons or other metadata
+            # that the frontend renders inside the bot bubble.
             if isinstance(data, dict):
                 response_text = data.get("text") or data.get("message") or data.get("output")
+                response_custom = data.get("custom") if isinstance(data.get("custom"), dict) else None
             elif isinstance(data, str):
                 response_text = data
     except httpx.TimeoutException:
@@ -182,8 +190,11 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
     try:
         client = get_stream_client()
         ch = client.channel(channel_type_raw or "messaging", channel_id)
+        msg_payload: dict[str, Any] = {"text": response_text.strip()}
+        if response_custom:
+            msg_payload["custom"] = response_custom
         ch.send_message(
-            message={"text": response_text.strip()},
+            message=msg_payload,
             user_id=bot_user_id,
         )
         logger.info(

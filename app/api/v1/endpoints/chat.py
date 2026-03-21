@@ -22,26 +22,91 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 class TokenRequest(BaseModel):
-    user_id: str
-    user_name: str
-    role: str
-    farm_id: str
+    """Request body for generating a Stream Chat user token."""
+
+    user_id: str = Field(
+        ...,
+        description="The Supabase user UUID. Used as the Stream Chat user ID.",
+        examples=["550e8400-e29b-41d4-a716-446655440000"],
+    )
+    user_name: str = Field(
+        ...,
+        description="The display name shown in Stream Chat (e.g. the user's full name or email).",
+        examples=["John Smith"],
+    )
+    role: str = Field(
+        ...,
+        description="The user's role in the application. One of: 'admin', 'manager', 'employee'.",
+        examples=["admin"],
+    )
+    farm_id: str = Field(
+        ...,
+        description="The farm's UUID. Stored on the Stream user profile for channel scoping.",
+        examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
+    )
 
 
 class TokenResponse(BaseModel):
-    token: str
+    """Stream Chat user token returned to the frontend."""
+
+    token: str = Field(
+        description=(
+            "A short-lived Stream Chat JWT. Pass this to the Stream SDK's connectUser() call "
+            "on the frontend. Tokens expire according to your Stream app settings."
+        ),
+        examples=["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiYWJjMTIzIn0.signature"],
+    )
 
 
 class SetupChannelsRequest(BaseModel):
-    user_id: str
-    role: str
-    farm_id: str
+    """Request body for creating or retrieving farm chat channels for a user."""
+
+    user_id: str = Field(
+        ...,
+        description="The Supabase user UUID. Used to create the personal DM channel.",
+        examples=["550e8400-e29b-41d4-a716-446655440000"],
+    )
+    role: str = Field(
+        ...,
+        description=(
+            "The user's role. Only 'admin' users get an Admin-Only channel. "
+            "All other roles receive All-Team and Personal DM channels only."
+        ),
+        examples=["admin"],
+    )
+    farm_id: str = Field(
+        ...,
+        description="The farm's UUID. All channel IDs are derived from this value.",
+        examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
+    )
 
 
 class SetupChannelsResponse(BaseModel):
-    all_team_channel_id: str
-    admin_channel_id: Optional[str]
-    dm_channel_id: str
+    """Channel IDs created or confirmed for the user."""
+
+    all_team_channel_id: str = Field(
+        description=(
+            "Stream channel ID for the farm-wide All-Team group. "
+            "Format: farm-{first8hex(farm_id)}-all-team."
+        ),
+        examples=["farm-a1b2c3d4-all-team"],
+    )
+    admin_channel_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Stream channel ID for the Admin-Only group. "
+            "Null when the user's role is not 'admin'. "
+            "Format: farm-{first8hex(farm_id)}-admin."
+        ),
+        examples=["farm-a1b2c3d4-admin"],
+    )
+    dm_channel_id: str = Field(
+        description=(
+            "Stream channel ID for the user's personal bot DM channel. "
+            "Format: farm-{first8hex(farm_id)}-dm-{first8hex(user_id)}."
+        ),
+        examples=["farm-a1b2c3d4-dm-550e8400"],
+    )
 
 
 class SendMessageRequest(BaseModel):
@@ -50,6 +115,18 @@ class SendMessageRequest(BaseModel):
     Use this to push scheduled messages, alerts, or AI-generated reports from
     n8n (or any external service) into a farm's chat channel without a user
     triggering the flow.
+
+    To attach action buttons to the message, include a ``custom`` dict with an
+    ``actions`` list.  Each action must have ``id`` and ``label``; ``style`` is
+    optional (``"primary"`` | ``"secondary"`` | ``"danger"``).  Example::
+
+        {
+            "actions": [
+                {"id": "confirm", "label": "Yes, do it",  "style": "primary"},
+                {"id": "cancel",  "label": "No, cancel",  "style": "secondary"}
+            ],
+            "action_context": {"intent": "delete_horse", "entry_id": "uuid"}
+        }
     """
 
     farm_id: str = Field(
@@ -90,14 +167,63 @@ class SendMessageRequest(BaseModel):
         ),
         examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
     )
+    custom: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional arbitrary metadata attached to the message. "
+            "Use the 'actions' key to render interactive buttons inside the bot bubble on the frontend. "
+            "Each action must have 'id' (machine key returned to n8n on click) and 'label' (button text). "
+            "The optional 'style' field controls the button colour: "
+            "'primary' = green fill, 'secondary' = grey outline, 'danger' = red fill. "
+            "The 'action_context' key is an opaque JSON object forwarded unchanged to n8n when "
+            "the user clicks — use it to carry the data your workflow needs to act on (e.g. entry IDs). "
+            "When the user clicks a button, a new message is sent whose custom.action_reply contains "
+            "action_id, action_context, and source_message_id. "
+            "Omit this field entirely for plain text messages (fully backward compatible)."
+        ),
+        examples=[{
+            "actions": [
+                {"id": "confirm_delete", "label": "Yes, delete it", "style": "danger"},
+                {"id": "cancel",         "label": "No, keep it",    "style": "secondary"},
+            ],
+            "action_context": {
+                "intent": "delete_horse_entry",
+                "horse_name": "CHECKPOINT",
+                "entry_id": "550e8400-e29b-41d4-a716-446655440000",
+            },
+        }],
+    )
 
 
 class SendMessageResponse(BaseModel):
-    """Confirmation that the message was accepted by Stream Chat."""
+    """Confirmation that the message was accepted and posted by Stream Chat."""
 
-    channel_id: str = Field(description="The Stream channel ID the message was posted to.")
-    bot: str = Field(description="The bot user ID that sent the message.")
-    message_id: str = Field(description="Stream's unique ID for the newly created message.")
+    channel_id: str = Field(
+        description="The Stream channel ID the message was posted to.",
+        examples=["farm-a1b2c3d4-all-team"],
+    )
+    bot: str = Field(
+        description="The Stream user ID of the bot that sent the message.",
+        examples=["all-team-bot"],
+    )
+    message_id: str = Field(
+        description="Stream's unique ID for the newly created message. Store this if you need to update or reference the message later.",
+        examples=["b8e5f3c2-1234-5678-abcd-ef0123456789"],
+    )
+
+
+class WebhookResponse(BaseModel):
+    """Acknowledgement returned by the webhook endpoint to Stream Chat."""
+
+    status: str = Field(
+        description="'ok' when the event was accepted and processed. 'ignored' when the event type is not handled.",
+        examples=["ok"],
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        description="Present only when status is 'ignored'. Explains why the event was skipped.",
+        examples=["not a message.new event"],
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -173,9 +299,30 @@ def _ensure_channel(
     response_model=ApiResponse[TokenResponse],
     summary="Get Stream Chat user token",
     description=(
-        "Upserts the authenticated user in Stream Chat and returns a short-lived "
-        "user token the frontend uses to connect. Requires the standard Bearer API key."
+        "Upserts the authenticated user in Stream Chat and returns a short-lived JWT "
+        "that the frontend passes to the Stream SDK's `connectUser()` call.\n\n"
+        "This endpoint also keeps the user's Stream profile in sync (name, role, farm_id) "
+        "on every call, so it is safe to call on every login.\n\n"
+        "**Authentication:** requires `Authorization: Bearer <API_SECRET_KEY>` header."
     ),
+    responses={
+        200: {
+            "description": "Token generated successfully.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 1,
+                        "message": "success",
+                        "data": {
+                            "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiYWJjMTIzIn0.signature",
+                        },
+                    }
+                }
+            },
+        },
+        401: {"description": "Missing or invalid Bearer token."},
+        500: {"description": "Stream Chat SDK error."},
+    },
 )
 async def get_chat_token(body: TokenRequest) -> ApiResponse[TokenResponse]:
     client = get_stream_client()
@@ -200,10 +347,52 @@ async def get_chat_token(body: TokenRequest) -> ApiResponse[TokenResponse]:
     response_model=ApiResponse[SetupChannelsResponse],
     summary="Create or get farm chat channels for a user",
     description=(
-        "Idempotently creates the All-Team group, Admin-Only group (admins only), "
-        "and Personal DM channel for the given user within their farm. "
-        "Safe to call on every login."
+        "Idempotently creates (or updates membership on) the farm's chat channels for the given user:\n\n"
+        "- **All-Team** — farm-wide group, created for every user.\n"
+        "- **Admin-Only** — admin-only group, created only when `role` is `'admin'`. "
+        "  `admin_channel_id` is `null` for non-admin users.\n"
+        "- **Personal DM** — one-to-one channel between the user and the personal bot.\n\n"
+        "This endpoint is idempotent and safe to call on every login. If the channels already "
+        "exist, membership is refreshed without duplicating data.\n\n"
+        "**Authentication:** requires `Authorization: Bearer <API_SECRET_KEY>` header."
     ),
+    responses={
+        200: {
+            "description": "Channels created or confirmed. Returns the Stream channel IDs.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "admin_user": {
+                            "summary": "Admin user — all three channels returned",
+                            "value": {
+                                "status": 1,
+                                "message": "success",
+                                "data": {
+                                    "all_team_channel_id": "farm-a1b2c3d4-all-team",
+                                    "admin_channel_id": "farm-a1b2c3d4-admin",
+                                    "dm_channel_id": "farm-a1b2c3d4-dm-550e8400",
+                                },
+                            },
+                        },
+                        "non_admin_user": {
+                            "summary": "Non-admin user — admin_channel_id is null",
+                            "value": {
+                                "status": 1,
+                                "message": "success",
+                                "data": {
+                                    "all_team_channel_id": "farm-a1b2c3d4-all-team",
+                                    "admin_channel_id": None,
+                                    "dm_channel_id": "farm-a1b2c3d4-dm-550e8400",
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        },
+        401: {"description": "Missing or invalid Bearer token."},
+        500: {"description": "Stream Chat SDK error."},
+    },
 )
 async def setup_channels(body: SetupChannelsRequest) -> ApiResponse[SetupChannelsResponse]:
     settings = get_settings()
@@ -281,13 +470,114 @@ async def setup_channels(body: SetupChannelsRequest) -> ApiResponse[SetupChannel
         "**Bot mapping (recommended):**\n"
         "- `all-team` channel → `all-team-bot`\n"
         "- `admin` channel    → `admin-bot`\n"
-        "- `dm` channel       → `personal-bot`"
+        "- `dm` channel       → `personal-bot`\n\n"
+        "**Action buttons (optional):**\n"
+        "Include a `custom` object with an `actions` array to render interactive buttons "
+        "inside the bot bubble on the frontend. Each action requires `id` (machine key sent "
+        "back to n8n on click) and `label` (button text). The optional `style` field controls "
+        "the button colour: `primary` (green), `secondary` (grey), or `danger` (red).\n\n"
+        "Example `custom` payload:\n"
+        "```json\n"
+        "{\n"
+        '  "actions": [\n'
+        '    {"id": "confirm", "label": "Yes, do it",  "style": "primary"},\n'
+        '    {"id": "cancel",  "label": "No, cancel",  "style": "secondary"}\n'
+        "  ],\n"
+        '  "action_context": {"intent": "delete_horse", "entry_id": "uuid"}\n'
+        "}\n"
+        "```\n\n"
+        "**What happens when the user clicks a button:**\n\n"
+        "The frontend automatically sends two requests:\n\n"
+        "1. A new channel message (triggers webhook → n8n):\n"
+        "```json\n"
+        "{\n"
+        '  "text": "Yes, delete it",\n'
+        '  "custom": {\n'
+        '    "action_reply": {\n'
+        '      "action_id": "confirm_delete",\n'
+        '      "action_context": {"intent": "delete_horse_entry", "entry_id": "uuid"},\n'
+        '      "source_message_id": "<id of this bot message>"\n'
+        "    }\n"
+        "  }\n"
+        "}\n"
+        "```\n\n"
+        "2. An update to the original bot message to persist the disabled state (so buttons "
+        "stay disabled across refresh and on all devices):\n"
+        "```json\n"
+        "{\n"
+        '  "id": "<id of this bot message>",\n'
+        '  "custom": {\n'
+        '    "actions": [...],\n'
+        '    "action_context": {...},\n'
+        '    "actions_answered": true,\n'
+        '    "selected_action_id": "confirm_delete"\n'
+        "  }\n"
+        "}\n"
+        "```\n\n"
+        "In n8n, check `{{ $json.message_custom.action_reply }}` to detect a button click. "
+        "If it exists, use `action_id` to know which button was pressed and `action_context` "
+        "to retrieve the data needed to act on it."
     ),
     responses={
-        200: {"description": "Message accepted and posted to Stream Chat."},
-        400: {"description": "Invalid request — e.g. `user_id` missing for a DM channel."},
-        401: {"description": "Missing or invalid `X-API-Key` header."},
-        500: {"description": "Stream Chat rejected the message."},
+        200: {
+            "description": "Message accepted and posted to Stream Chat.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "plain_message": {
+                            "summary": "Plain text bot message posted successfully",
+                            "value": {
+                                "status": 1,
+                                "message": "success",
+                                "data": {
+                                    "channel_id": "farm-a1b2c3d4-all-team",
+                                    "bot": "all-team-bot",
+                                    "message_id": "b8e5f3c2-1234-5678-abcd-ef0123456789",
+                                },
+                            },
+                        },
+                        "message_with_buttons": {
+                            "summary": "Bot message with action buttons posted successfully",
+                            "value": {
+                                "status": 1,
+                                "message": "success",
+                                "data": {
+                                    "channel_id": "farm-a1b2c3d4-dm-550e8400",
+                                    "bot": "personal-bot",
+                                    "message_id": "c9f6d4e3-5678-1234-efab-cd9012345678",
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        },
+        400: {
+            "description": "Invalid request body.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "'user_id' is required when channel_context is 'dm'."
+                    }
+                }
+            },
+        },
+        401: {
+            "description": "Missing or invalid X-API-Key header.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Invalid or missing X-API-Key header."}
+                }
+            },
+        },
+        500: {
+            "description": "Stream Chat rejected the message.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Stream Chat error: <error details>"}
+                }
+            },
+        },
     },
 )
 async def send_message(
@@ -326,9 +616,13 @@ async def send_message(
     client = get_stream_client()
     ch = client.channel("messaging", channel_id)
 
+    msg_payload: dict[str, Any] = {"text": body.text}
+    if body.custom:
+        msg_payload["custom"] = body.custom
+
     try:
         response = ch.send_message(
-            message={"text": body.text},
+            message=msg_payload,
             user_id=bot_user_id,
         )
     except Exception as exc:
@@ -349,17 +643,142 @@ async def send_message(
 
 @router.post(
     "/webhook",
+    response_model=WebhookResponse,
     summary="Stream Chat webhook receiver",
     description=(
-        "Receives message.new events from Stream Chat. "
-        "Verifies the HMAC signature, deduplicates, skips bot messages, "
-        "then routes to the appropriate n8n workflow via chat_bot.process_webhook_event."
+        "Receives `message.new` events pushed by Stream Chat. This URL must be registered "
+        "in the Stream Dashboard under **Chat → Webhooks** with the `message.new` event enabled.\n\n"
+        "**Processing pipeline:**\n"
+        "1. Verifies the HMAC-SHA256 signature in the `X-Signature` header.\n"
+        "2. Deduplicates by message ID (in-memory, cleared on restart).\n"
+        "3. Skips messages authored by any of the three bot users.\n"
+        "4. Detects the channel context (`all-team` / `admin` / `dm`) from the channel ID pattern.\n"
+        "5. Forwards the event to the matching n8n webhook URL.\n"
+        "6. Posts n8n's reply back into the same channel as the appropriate bot.\n\n"
+        "**Payload forwarded to n8n:**\n"
+        "```json\n"
+        "{\n"
+        '  "channel_id": "farm-a1b2c3d4-dm-550e8400",\n'
+        '  "channel_context": "dm",\n'
+        '  "farm_id": "a1b2c3d4",\n'
+        '  "message_id": "msg-abc123",\n'
+        '  "message_text": "delete horse CHECKPOINT",\n'
+        '  "message_custom": {},\n'
+        '  "user_id": "user-uuid",\n'
+        '  "user_name": "John Smith",\n'
+        '  "mentioned_users": []\n'
+        "}\n"
+        "```\n\n"
+        "`message_custom` is empty `{}` for plain text messages. When the user clicks a bot "
+        "action button it contains `action_reply` with `action_id`, `action_context`, and "
+        "`source_message_id` — use this in n8n to distinguish button clicks from free-text.\n\n"
+        "**Expected n8n response (plain text reply):**\n"
+        "```json\n"
+        '{ "text": "Here is the answer..." }\n'
+        "```\n\n"
+        "**Expected n8n response (reply with action buttons):**\n"
+        "```json\n"
+        "{\n"
+        '  "text": "Are you sure?",\n'
+        '  "custom": {\n'
+        '    "actions": [\n'
+        '      {"id": "yes", "label": "Yes, do it", "style": "primary"},\n'
+        '      {"id": "no",  "label": "Cancel",     "style": "secondary"}\n'
+        "    ],\n"
+        '    "action_context": {"intent": "delete_horse", "entry_id": "uuid"}\n'
+        "  }\n"
+        "}\n"
+        "```\n\n"
+        "**Button click — what n8n receives:**\n\n"
+        "When a user clicks an action button, the frontend automatically sends a new channel "
+        "message. Stream fires a `message.new` webhook for it, and the backend forwards it to "
+        "n8n with `message_custom.action_reply` populated:\n\n"
+        "```json\n"
+        "{\n"
+        '  "channel_id": "farm-a1b2c3d4-dm-550e8400",\n'
+        '  "channel_context": "dm",\n'
+        '  "farm_id": "a1b2c3d4",\n'
+        '  "message_id": "msg-new-111",\n'
+        '  "message_text": "Yes, delete it",\n'
+        '  "message_custom": {\n'
+        '    "action_reply": {\n'
+        '      "action_id": "confirm_delete",\n'
+        '      "action_context": {\n'
+        '        "intent": "delete_horse_entry",\n'
+        '        "horse_name": "CHECKPOINT",\n'
+        '        "entry_id": "550e8400-e29b-41d4-a716-446655440000"\n'
+        "      },\n"
+        '      "source_message_id": "msg-original-bot-xyz"\n'
+        "    }\n"
+        "  },\n"
+        '  "user_id": "user-uuid",\n'
+        '  "user_name": "John Smith",\n'
+        '  "mentioned_users": []\n'
+        "}\n"
+        "```\n\n"
+        "Key fields in `message_custom.action_reply`:\n"
+        "- `action_id` — the `id` of the button the user clicked (e.g. `'confirm_delete'`).\n"
+        "- `action_context` — the opaque context blob you attached when the bot sent the buttons. "
+        "Forwarded unchanged — use it to carry entry IDs, horse names, or any data your workflow needs.\n"
+        "- `source_message_id` — the Stream message ID of the original bot message that contained the buttons.\n\n"
+        "**Recommended n8n branch logic:**\n"
+        "Add an IF node as the first step in your workflow:\n"
+        "```\n"
+        "Condition: {{ $json.message_custom.action_reply }} exists\n"
+        "  → TRUE  → Button click handler (use action_id + action_context)\n"
+        "  → FALSE → Free-text message handler (use message_text)\n"
+        "```\n\n"
+        "**Authentication:** Stream signs every webhook request with HMAC-SHA256 using your "
+        "`STREAM_API_SECRET`. The signature is in the `X-Signature` header. Verification is "
+        "skipped if `STREAM_API_SECRET` is not set in the backend `.env` (not recommended for production)."
     ),
+    responses={
+        200: {
+            "description": "Event acknowledged. Always returns 200 so Stream does not retry.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "processed_free_text": {
+                            "summary": "Free-text user message — forwarded to n8n",
+                            "value": {"status": "ok"},
+                        },
+                        "processed_button_click": {
+                            "summary": "Button click — forwarded to n8n with action_reply",
+                            "value": {"status": "ok"},
+                        },
+                        "ignored": {
+                            "summary": "Event type not handled (e.g. reaction.new)",
+                            "value": {
+                                "status": "ignored",
+                                "reason": "not a message.new event",
+                            },
+                        },
+                    }
+                }
+            },
+        },
+        400: {
+            "description": "Request body is not valid JSON.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Invalid JSON payload"}
+                }
+            },
+        },
+        401: {
+            "description": "HMAC-SHA256 signature verification failed.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Invalid webhook signature"}
+                }
+            },
+        },
+    },
 )
 async def stream_webhook(
     request: Request,
     x_signature: Optional[str] = Header(None, alias="X-Signature"),
-) -> dict[str, Any]:
+) -> WebhookResponse:
     settings = get_settings()
     body = await request.body()
 
@@ -376,7 +795,7 @@ async def stream_webhook(
 
     event_type = payload.get("type", "")
     if event_type != "message.new":
-        return {"status": "ignored", "reason": "not a message.new event"}
+        return WebhookResponse(status="ignored", reason="not a message.new event")
 
     # Process — respond 200 immediately so Stream does not retry
     try:
@@ -384,4 +803,4 @@ async def stream_webhook(
     except Exception as exc:
         logger.exception("chat_bot.process_webhook_event raised an error: %s", exc)
 
-    return {"status": "ok"}
+    return WebhookResponse(status="ok")
