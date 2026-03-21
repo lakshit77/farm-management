@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     N8N_ADMIN_WEBHOOK_URL: str = ""
     N8N_PERSONAL_WEBHOOK_URL: str = ""
 
+    # ── Web Push (VAPID) ───────────────────────────────────────────────────────
+    # Generated once via pywebpush keygen; public key is sent to the frontend.
+    VAPID_PUBLIC_KEY: str = ""
+    VAPID_PRIVATE_KEY: str = ""
+    VAPID_EMAIL: str = "mailto:admin@showgroundslive.com"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -16,3 +16,9 @@ alembic>=1.13.0
 
 # Stream Chat server SDK
 stream-chat>=4.0.0
+
+# Web Push notifications (VAPID-signed push via browser push services)
+pywebpush>=2.0.0
+
+# JWT decoding for push subscription auth (extract user_id from Supabase Bearer JWT)
+PyJWT>=2.0.0

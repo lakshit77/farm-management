@@ -1030,6 +1030,27 @@ async def run_daily_schedule(date_override: Optional[str] = None) -> dict[str, A
                 total_synced_entries,
                 len(horse_names),
             )
+
+            # Fire morning summary push notification (fire-and-forget, own session)
+            try:
+                import asyncio as _asyncio  # noqa: PLC0415
+                from app.services.push_notifications import notify_morning_summary  # noqa: PLC0415
+
+                _first_class_time: Optional[str] = None
+                if summary.get("first_class") and summary["first_class"].get("time"):
+                    _first_class_time = summary["first_class"]["time"]
+
+                _asyncio.create_task(
+                    notify_morning_summary(
+                        farm_id=farm_id,
+                        class_count=len(name_class_number_to_class_id),
+                        horse_count=len(horse_names),
+                        first_class_time=_first_class_time,
+                    )
+                )
+            except Exception as _push_exc:
+                logger.warning("Morning summary push failed: %s", _push_exc)
+
             return {
                 "task": ScheduleTaskResult.COMPLETED.value,
                 "trigger": ScheduleTriggerType.DAILY.value,

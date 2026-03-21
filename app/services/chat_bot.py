@@ -11,8 +11,10 @@ Channel ID naming convention (set by setup-channels endpoint):
   farm-{farmId}-dm-{uid}   ->  personal-bot  ->  N8N_PERSONAL_WEBHOOK_URL
 """
 
+import asyncio
 import logging
 import re
+import uuid
 from typing import Any, Optional
 
 import httpx
@@ -279,5 +281,94 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
             "Failed to send bot response in channel %s for message %s: %s",
             channel_id,
             message_id,
+            exc,
+        )
+
+    # ── Fire push notifications for all channel members (except the sender) ─
+    # Run fire-and-forget so it does not block the webhook response to Stream.
+    if farm_id and channel_context:
+        try:
+            farm_uuid = uuid.UUID(farm_id) if isinstance(farm_id, str) and len(farm_id) == 8 else None
+            # farm_id from _extract_farm_id is the 8-char compact ID — we need the full
+            # farm UUID from the DB. For now, pass channel_id so the push service can
+            # query push_subscriptions by farm using the compact id lookup if needed.
+            # The push service queries by farm_id UUID; we skip if the short ID can't
+            # be resolved here. Full farm UUID resolution would require a DB lookup here.
+            # We use a lightweight approach: store farm_id as text in push_subscriptions
+            # and do a partial match. For robustness, we skip push if farm_uuid is None.
+            if farm_uuid is None:
+                from app.services.push_notifications import notify_chat_message as _notify_chat  # noqa: PLC0415
+                asyncio.create_task(
+                    _fire_chat_push(
+                        farm_id_compact=farm_id,
+                        channel_context=channel_context,
+                        sender_id=author_id,
+                        sender_name=author_name,
+                        message_text=message_text,
+                        channel_id=channel_id,
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Could not schedule push notification for chat message: %s", exc)
+
+
+async def _fire_chat_push(
+    farm_id_compact: str,
+    channel_context: str,
+    sender_id: str,
+    sender_name: str,
+    message_text: str,
+    channel_id: str,
+) -> None:
+    """Resolve full farm UUID from compact channel ID prefix and fire push notification.
+
+    The farm_id in the channel ID is the first 8 hex chars of the farm UUID.
+    We query the DB to find the matching farm, then fire push notifications.
+
+    Args:
+        farm_id_compact: First 8 hex chars of farm UUID (from channel ID).
+        channel_context: "all-team" | "admin" | "dm".
+        sender_id: Stream/Supabase user ID of the message sender.
+        sender_name: Display name of the sender.
+        message_text: Raw message text.
+        channel_id: Full Stream channel ID.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    from app.core.database import AsyncSessionLocal  # noqa: PLC0415
+    from app.models.farm import Farm  # noqa: PLC0415
+    from app.services.push_notifications import notify_chat_message  # noqa: PLC0415
+
+    try:
+        async with AsyncSessionLocal() as session:
+            # Find the farm whose UUID starts with the compact prefix
+            result = await session.execute(
+                text(
+                    "SELECT id FROM farms WHERE REPLACE(id::text, '-', '') LIKE :prefix LIMIT 1"
+                ),
+                {"prefix": farm_id_compact + "%"},
+            )
+            row = result.fetchone()
+            if row is None:
+                logger.warning(
+                    "Push: could not resolve farm UUID for compact id=%s (channel=%s)",
+                    farm_id_compact,
+                    channel_id,
+                )
+                return
+            farm_uuid: uuid.UUID = row[0]
+
+        await notify_chat_message(
+            farm_id=farm_uuid,
+            channel_context=channel_context,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            message_text=message_text,
+            channel_id=channel_id,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Push: _fire_chat_push failed for channel=%s: %s",
+            channel_id,
             exc,
         )

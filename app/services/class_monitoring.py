@@ -740,6 +740,12 @@ async def run_class_monitoring(date_override: Optional[str] = None) -> Dict[str,
 
         await session.commit()
 
+    # Fire push notifications for all detected changes (after DB commit, own session)
+    if all_changes:
+        from app.services.push_notifications import notify_monitoring_changes  # noqa: PLC0415
+
+        asyncio.create_task(notify_monitoring_changes(farm_id=farm_id, changes=all_changes))
+
     return {
         "skipped": False,
         "summary": {
