@@ -341,6 +341,8 @@ async def test_push(
     )
 
     sent = 0
+    failed = 0
+    errors: list[str] = []
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(PushSubscription).where(
@@ -351,13 +353,25 @@ async def test_push(
         subscriptions = list(result.scalars().all())
 
         for sub in subscriptions:
-            await _send_one(session, sub, payload)
-            sent += 1
+            ok = await _send_one(session, sub, payload)
+            if ok:
+                sent += 1
+            else:
+                failed += 1
+                errors.append(f"endpoint=...{sub.endpoint[-40:]}")
 
         await session.commit()
 
-    logger.info("Test push sent to %s device(s) for user=%s", sent, user_id)
-    return success_response(data={"devices_notified": sent})
+    logger.info(
+        "Test push: sent=%s failed=%s for user=%s",
+        sent, failed, user_id,
+    )
+    return success_response(data={
+        "devices_found": len(subscriptions),
+        "devices_notified": sent,
+        "devices_failed": failed,
+        "errors": errors,
+    })
 
 
 @router.get(
