@@ -72,7 +72,17 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
     message: dict[str, Any] = event.get("message", {})
     message_id: str = message.get("id", "")
     message_text: str = message.get("text", "")
+    # Stream stores extra fields sent via the JS/Python SDK under the
+    # "custom" key.  However some SDK/API versions spread them at the
+    # message root instead.  We read both locations for robustness.
     message_custom: dict[str, Any] = message.get("custom", {})
+
+    logger.info(
+        "[webhook] msg=%s  keys=%s  custom=%s",
+        message_id,
+        list(message.keys()),
+        message_custom,
+    )
     author: dict[str, Any] = message.get("user", {})
     author_id: str = author.get("id", "")
     author_name: str = author.get("name", author_id)
@@ -114,31 +124,57 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
     # with custom.action_reply.  The frontend cannot update the bot's own
     # message (permission denied), so the backend does it here using the
     # server-side client which has admin privileges.
-    action_reply: Optional[dict[str, Any]] = message_custom.get("action_reply")
+    #
+    # Stream might nest the data under message.custom or spread it at the
+    # message root, so we check both.
+    action_reply: Optional[dict[str, Any]] = (
+        message_custom.get("action_reply")
+        or message.get("action_reply")
+    )
+    logger.info(
+        "[webhook] action_reply resolved to: %s (from custom: %s, from root: %s)",
+        action_reply,
+        message_custom.get("action_reply"),
+        message.get("action_reply"),
+    )
     if action_reply and isinstance(action_reply, dict):
         source_msg_id: str = action_reply.get("source_message_id", "")
+        selected_action_id: str = action_reply.get("action_id", "")
+        logger.info(
+            "[action_reply] source_msg_id=%s  selected_action_id=%s",
+            source_msg_id,
+            selected_action_id,
+        )
         if source_msg_id:
             try:
                 client = get_stream_client()
-                # Fetch the original bot message so we preserve its text when
-                # updating.  get_message is on the client, not the channel.
+                # Fetch the original bot message to:
+                #  a) preserve its text and existing custom data,
+                #  b) get the bot user_id (required by server-side auth).
+                # NOTE: update_message_partial cannot touch the "custom"
+                # field (Stream reserves it), so we must do a full update.
                 original_resp = client.get_message(source_msg_id)
                 original_msg: dict[str, Any] = original_resp.get("message", {})
                 original_custom: dict[str, Any] = original_msg.get("custom", {})
+                bot_uid: str = original_msg.get("user", {}).get("id", "")
+
                 original_custom["actions_answered"] = True
-                original_custom["selected_action_id"] = action_reply.get("action_id", "")
+                original_custom["selected_action_id"] = selected_action_id
+
                 client.update_message({
                     "id": source_msg_id,
                     "text": original_msg.get("text", ""),
+                    "user_id": bot_uid,
                     "custom": original_custom,
                 })
                 logger.info(
-                    "Marked bot message %s as answered (action_id=%s)",
+                    "Marked bot message %s as answered (action_id=%s, bot=%s)",
                     source_msg_id,
-                    action_reply.get("action_id"),
+                    selected_action_id,
+                    bot_uid,
                 )
             except Exception as exc:
-                logger.warning(
+                logger.error(
                     "Failed to update bot message %s with answered state: %s",
                     source_msg_id,
                     exc,
