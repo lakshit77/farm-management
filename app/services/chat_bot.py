@@ -109,6 +109,41 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
         for mid in to_remove:
             _processed_message_ids.discard(mid)
 
+    # ── Persist action-button answered state on the original bot message ────
+    # When a user clicks a bot action button, the frontend sends a message
+    # with custom.action_reply.  The frontend cannot update the bot's own
+    # message (permission denied), so the backend does it here using the
+    # server-side client which has admin privileges.
+    action_reply: Optional[dict[str, Any]] = message_custom.get("action_reply")
+    if action_reply and isinstance(action_reply, dict):
+        source_msg_id: str = action_reply.get("source_message_id", "")
+        if source_msg_id:
+            try:
+                client = get_stream_client()
+                # Fetch the original bot message so we preserve its text when
+                # updating.  get_message is on the client, not the channel.
+                original_resp = client.get_message(source_msg_id)
+                original_msg: dict[str, Any] = original_resp.get("message", {})
+                original_custom: dict[str, Any] = original_msg.get("custom", {})
+                original_custom["actions_answered"] = True
+                original_custom["selected_action_id"] = action_reply.get("action_id", "")
+                client.update_message({
+                    "id": source_msg_id,
+                    "text": original_msg.get("text", ""),
+                    "custom": original_custom,
+                })
+                logger.info(
+                    "Marked bot message %s as answered (action_id=%s)",
+                    source_msg_id,
+                    action_reply.get("action_id"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to update bot message %s with answered state: %s",
+                    source_msg_id,
+                    exc,
+                )
+
     # ── Identify channel context ────────────────────────────────────────────
     channel_context = _detect_channel_type(channel_id)
     if channel_context is None:
