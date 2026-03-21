@@ -142,7 +142,7 @@ async def _send_one(
     session: AsyncSession,
     subscription: PushSubscription,
     payload: str,
-) -> bool:
+) -> None:
     """Send a push to a single device subscription.
 
     Runs pywebpush in a thread-pool executor to avoid blocking the event loop.
@@ -152,9 +152,6 @@ async def _send_one(
         session: Async DB session (caller-owned; used only for cleanup writes).
         subscription: The PushSubscription ORM row to send to.
         payload: JSON string (from _build_payload).
-
-    Returns:
-        True if the push was sent successfully, False on any error.
     """
     settings = get_settings()
 
@@ -181,21 +178,13 @@ async def _send_one(
         await loop.run_in_executor(None, _do_send)
         subscription.last_used_at = datetime.now(timezone.utc)
         session.add(subscription)
-        logger.info(
-            "Push sent OK to user=%s endpoint=...%s",
+        logger.debug(
+            "Push sent to user=%s endpoint=...%s",
             subscription.user_id,
-            subscription.endpoint[-40:],
+            subscription.endpoint[-20:],
         )
-        return True
     except Exception as exc:
         exc_str = str(exc)
-        logger.error(
-            "Push FAILED for user=%s endpoint=...%s: %s",
-            subscription.user_id,
-            subscription.endpoint[-40:],
-            exc,
-            exc_info=True,
-        )
         if "410" in exc_str or "404" in exc_str or "gone" in exc_str.lower():
             logger.info(
                 "Push subscription expired (410/404) for user=%s — marking inactive",
@@ -203,7 +192,12 @@ async def _send_one(
             )
             subscription.is_active = False
             session.add(subscription)
-        return False
+        else:
+            logger.error(
+                "Failed to send push to user=%s: %s",
+                subscription.user_id,
+                exc,
+            )
 
 
 # ── Mid-level: send to a set of user IDs ──────────────────────────────────────
