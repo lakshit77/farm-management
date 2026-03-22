@@ -162,8 +162,10 @@ class SendMessageRequest(BaseModel):
     user_id: Optional[str] = Field(
         default=None,
         description=(
-            "Required only when channel_context is 'dm'. "
-            "The UUID of the user whose personal DM channel should receive the message."
+            "Required when channel_context is 'dm'; ignored for 'all-team' and 'admin'. "
+            "The Supabase UUID of the user whose personal DM channel should receive the message. "
+            "In an n8n workflow triggered by the webhook, this is available as "
+            "`{{ $json.user_id }}` from the incoming webhook payload."
         ),
         examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
     )
@@ -489,12 +491,24 @@ async def setup_channels(body: SetupChannelsRequest) -> ApiResponse[SetupChannel
         "The original message will appear quoted above the bot's reply.\n\n"
         "In an n8n workflow triggered by the webhook, the incoming payload already contains "
         "`message_id` — the ID of the user's message. Pass it back as `quoted_message_id` in "
-        "the `/send-message` call to make the bot quote-reply to that specific message:\n\n"
+        "the `/send-message` call to make the bot quote-reply to that specific message.\n\n"
+        "Example for a **DM channel** (`user_id` is required when `channel_context` is `'dm'`):\n\n"
         "```json\n"
         "{\n"
-        '  "farm_id": "...",\n'
+        '  "farm_id": "{{ $json.farm_id }}",\n'
         '  "channel_context": "dm",\n'
+        '  "user_id": "{{ $json.user_id }}",\n'
         '  "bot": "personal-bot",\n'
+        '  "text": "Here is the answer...",\n'
+        '  "quoted_message_id": "{{ $json.message_id }}"\n'
+        "}\n"
+        "```\n\n"
+        "Example for an **all-team channel** (`user_id` is not needed):\n\n"
+        "```json\n"
+        "{\n"
+        '  "farm_id": "{{ $json.farm_id }}",\n'
+        '  "channel_context": "all-team",\n'
+        '  "bot": "all-team-bot",\n'
         '  "text": "Here is the answer...",\n'
         '  "quoted_message_id": "{{ $json.message_id }}"\n'
         "}\n"
