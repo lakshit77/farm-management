@@ -264,6 +264,10 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
         client = get_stream_client()
         ch = client.channel(channel_type_raw or "messaging", channel_id)
         msg_payload: dict[str, Any] = {"text": response_text.strip()}
+        # Quote-reply to the user's original message so the response is visually
+        # anchored to it — identical to the "swipe right to reply" UI behaviour.
+        if message_id:
+            msg_payload["quoted_message_id"] = message_id
         if response_custom:
             msg_payload["custom"] = response_custom
         ch.send_message(

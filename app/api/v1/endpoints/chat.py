@@ -167,6 +167,18 @@ class SendMessageRequest(BaseModel):
         ),
         examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
     )
+    quoted_message_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Stream message ID to quote-reply to. "
+            "When set, the bot's message will appear with the original message quoted above it — "
+            "identical to the 'swipe right to reply' behaviour in the mobile UI. "
+            "Pass the 'message_id' that the webhook forwarded to n8n to have the bot reply "
+            "directly to the user's message. "
+            "Omit this field for a regular (non-quoted) message."
+        ),
+        examples=["b8e5f3c2-1234-5678-abcd-ef0123456789"],
+    )
     custom: Optional[dict[str, Any]] = Field(
         default=None,
         description=(
@@ -471,6 +483,25 @@ async def setup_channels(body: SetupChannelsRequest) -> ApiResponse[SetupChannel
         "- `all-team` channel → `all-team-bot`\n"
         "- `admin` channel    → `admin-bot`\n"
         "- `dm` channel       → `personal-bot`\n\n"
+        "**Quoted replies (optional):**\n"
+        "Set `quoted_message_id` to the Stream message ID of any existing message to have the bot "
+        "reply to it directly — identical to the 'swipe right to reply' behaviour in the mobile UI. "
+        "The original message will appear quoted above the bot's reply.\n\n"
+        "In an n8n workflow triggered by the webhook, the incoming payload already contains "
+        "`message_id` — the ID of the user's message. Pass it back as `quoted_message_id` in "
+        "the `/send-message` call to make the bot quote-reply to that specific message:\n\n"
+        "```json\n"
+        "{\n"
+        '  "farm_id": "...",\n'
+        '  "channel_context": "dm",\n'
+        '  "bot": "personal-bot",\n'
+        '  "text": "Here is the answer...",\n'
+        '  "quoted_message_id": "{{ $json.message_id }}"\n'
+        "}\n"
+        "```\n\n"
+        "Note: when a message is sent via the `/webhook` auto-reply path (i.e. n8n returns "
+        "a `text` response directly), the backend automatically sets `quoted_message_id` to "
+        "the triggering user message — no extra configuration needed for that flow.\n\n"
         "**Action buttons (optional):**\n"
         "Include a `custom` object with an `actions` array to render interactive buttons "
         "inside the bot bubble on the frontend. Each action requires `id` (machine key sent "
@@ -617,6 +648,8 @@ async def send_message(
     ch = client.channel("messaging", channel_id)
 
     msg_payload: dict[str, Any] = {"text": body.text}
+    if body.quoted_message_id:
+        msg_payload["quoted_message_id"] = body.quoted_message_id
     if body.custom:
         msg_payload["custom"] = body.custom
 
@@ -676,6 +709,8 @@ async def send_message(
         "```json\n"
         '{ "text": "Here is the answer..." }\n'
         "```\n\n"
+        "The bot automatically quote-replies to the user's message (sets `quoted_message_id` "
+        "internally) so the reply is visually anchored to it in the UI — no extra config needed.\n\n"
         "**Expected n8n response (reply with action buttons):**\n"
         "```json\n"
         "{\n"
