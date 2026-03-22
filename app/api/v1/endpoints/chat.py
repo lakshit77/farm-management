@@ -635,20 +635,19 @@ async def send_message(
     if settings.API_SECRET_KEY and x_api_key != settings.API_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header.")
 
-    # Resolve the channel ID
-    compact_farm = body.farm_id.replace("-", "")
+    # Resolve the channel ID — all IDs use _short() (first 8 hex chars) to match
+    # the deterministic IDs created by setup_channels via _channel_id()/_short().
     if body.channel_context == "all-team":
-        channel_id = f"farm-{compact_farm}-all-team"
+        channel_id = _channel_id(body.farm_id, "all-team")
     elif body.channel_context == "admin":
-        channel_id = f"farm-{compact_farm}-admin"
+        channel_id = _channel_id(body.farm_id, "admin")
     else:  # dm
         if not body.user_id:
             raise HTTPException(
                 status_code=400,
                 detail="'user_id' is required when channel_context is 'dm'.",
             )
-        short_user = body.user_id.replace("-", "")[:16]
-        channel_id = f"farm-{compact_farm}-dm-{short_user}"
+        channel_id = _channel_id(body.farm_id, f"dm-{_short(body.user_id)}")
 
     # Resolve the bot user ID from the settings (falls back to the request value)
     bot_id_map = {
