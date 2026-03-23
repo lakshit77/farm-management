@@ -226,7 +226,7 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
     response_text: Optional[str] = None
     response_custom: Optional[dict[str, Any]] = None
     try:
-        async with httpx.AsyncClient(timeout=30.0) as http:
+        async with httpx.AsyncClient(timeout=90.0) as http:
             resp = await http.post(n8n_url, json=n8n_payload)
             resp.raise_for_status()
             data = resp.json()
