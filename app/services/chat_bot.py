@@ -290,28 +290,20 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
 
     # ── Fire push notifications for all channel members (except the sender) ─
     # Run fire-and-forget so it does not block the webhook response to Stream.
+    # farm_id here is always the 8-char compact prefix from _extract_farm_id;
+    # _fire_chat_push resolves it to a full UUID via a DB lookup.
     if farm_id and channel_context:
         try:
-            farm_uuid = uuid.UUID(farm_id) if isinstance(farm_id, str) and len(farm_id) == 8 else None
-            # farm_id from _extract_farm_id is the 8-char compact ID — we need the full
-            # farm UUID from the DB. For now, pass channel_id so the push service can
-            # query push_subscriptions by farm using the compact id lookup if needed.
-            # The push service queries by farm_id UUID; we skip if the short ID can't
-            # be resolved here. Full farm UUID resolution would require a DB lookup here.
-            # We use a lightweight approach: store farm_id as text in push_subscriptions
-            # and do a partial match. For robustness, we skip push if farm_uuid is None.
-            if farm_uuid is None:
-                from app.services.push_notifications import notify_chat_message as _notify_chat  # noqa: PLC0415
-                asyncio.create_task(
-                    _fire_chat_push(
-                        farm_id_compact=farm_id,
-                        channel_context=channel_context,
-                        sender_id=author_id,
-                        sender_name=author_name,
-                        message_text=message_text,
-                        channel_id=channel_id,
-                    )
+            asyncio.create_task(
+                _fire_chat_push(
+                    farm_id_compact=farm_id,
+                    channel_context=channel_context,
+                    sender_id=author_id,
+                    sender_name=author_name,
+                    message_text=message_text,
+                    channel_id=channel_id,
                 )
+            )
         except Exception as exc:
             logger.warning("Could not schedule push notification for chat message: %s", exc)
 
