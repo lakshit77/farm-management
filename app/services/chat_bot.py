@@ -309,6 +309,9 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
                     sender_name=author_name,
                     message_text=message_text,
                     channel_id=channel_id,
+                    # For DM channels the sender IS the channel owner — pass their
+                    # full Supabase user ID so push is restricted to only them.
+                    dm_user_id=author_id if channel_context == "dm" else None,
                 )
             )
             logger.info("[push] _fire_chat_push task created for channel=%s", channel_id)
@@ -325,6 +328,7 @@ async def _fire_chat_push(
     sender_name: str,
     message_text: str,
     channel_id: str,
+    dm_user_id: Optional[str] = None,
 ) -> None:
     """Resolve full farm UUID from compact channel ID prefix and fire push notification.
 
@@ -338,6 +342,9 @@ async def _fire_chat_push(
         sender_name: Display name of the sender.
         message_text: Raw message text.
         channel_id: Full Stream channel ID.
+        dm_user_id: For DM channels, the Supabase user ID of the channel owner.
+            When set, push is restricted to only this user so other farm members
+            do not receive notifications for someone else's private conversation.
     """
     from sqlalchemy import text  # noqa: PLC0415
 
@@ -379,6 +386,7 @@ async def _fire_chat_push(
             sender_name=sender_name,
             message_text=message_text,
             channel_id=channel_id,
+            dm_user_id=dm_user_id,
         )
         logger.info("[push] notify_chat_message completed for farm=%s channel=%s", farm_uuid, channel_id)
     except Exception as exc:

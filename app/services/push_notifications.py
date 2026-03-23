@@ -315,6 +315,7 @@ async def notify_chat_message(
     sender_name: str,
     message_text: str,
     channel_id: str,
+    dm_user_id: Optional[str] = None,
 ) -> None:
     """Send push notifications to channel members when a new chat message arrives.
 
@@ -328,6 +329,9 @@ async def notify_chat_message(
         sender_name: Display name of the sender.
         message_text: The raw message text (truncated to 120 chars in body).
         channel_id: Full channel ID string (used to build the deep-link URL).
+        dm_user_id: For DM channels, the Supabase user ID of the channel owner.
+            Push is restricted to only this user so other farm members do not
+            receive notifications for someone else's private conversation.
     """
     # Map channel context to preference key and notification title
     context_map: Dict[str, tuple[str, str]] = {
@@ -356,6 +360,10 @@ async def notify_chat_message(
         sender_id,
     )
 
+    # For DM channels restrict delivery to only the channel owner — other farm
+    # members should never see push notifications for someone else's private chat.
+    restrict_to: Optional[List[str]] = [dm_user_id] if dm_user_id else None
+
     async with AsyncSessionLocal() as session:
         try:
             await send_push_to_farm(
@@ -363,6 +371,7 @@ async def notify_chat_message(
                 farm_id=farm_id,
                 payload=payload,
                 preference_key=preference_key,
+                restrict_to_user_ids=restrict_to,
                 exclude_user_id=sender_id,
             )
             await session.commit()
