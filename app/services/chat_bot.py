@@ -292,6 +292,13 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
     # Run fire-and-forget so it does not block the webhook response to Stream.
     # farm_id here is always the 8-char compact prefix from _extract_farm_id;
     # _fire_chat_push resolves it to a full UUID via a DB lookup.
+    logger.info(
+        "[push] Attempting chat push: farm_id=%s channel_context=%s sender_id=%s channel_id=%s",
+        farm_id,
+        channel_context,
+        author_id,
+        channel_id,
+    )
     if farm_id and channel_context:
         try:
             asyncio.create_task(
@@ -304,8 +311,11 @@ async def process_webhook_event(event: dict[str, Any]) -> None:
                     channel_id=channel_id,
                 )
             )
+            logger.info("[push] _fire_chat_push task created for channel=%s", channel_id)
         except Exception as exc:
             logger.warning("Could not schedule push notification for chat message: %s", exc)
+    else:
+        logger.warning("[push] Skipped chat push — farm_id=%r channel_context=%r", farm_id, channel_context)
 
 
 async def _fire_chat_push(
@@ -335,25 +345,33 @@ async def _fire_chat_push(
     from app.models.farm import Farm  # noqa: PLC0415
     from app.services.push_notifications import notify_chat_message  # noqa: PLC0415
 
+    logger.info("[push] _fire_chat_push started: compact_id=%s channel=%s", farm_id_compact, channel_id)
     try:
         async with AsyncSessionLocal() as session:
             # Find the farm whose UUID starts with the compact prefix
+            query = "SELECT id FROM farms WHERE REPLACE(id::text, '-', '') LIKE :prefix LIMIT 1"
+            logger.info("[push] Running farm lookup query with prefix=%s", farm_id_compact + "%")
             result = await session.execute(
-                text(
-                    "SELECT id FROM farms WHERE REPLACE(id::text, '-', '') LIKE :prefix LIMIT 1"
-                ),
+                text(query),
                 {"prefix": farm_id_compact + "%"},
             )
             row = result.fetchone()
             if row is None:
                 logger.warning(
-                    "Push: could not resolve farm UUID for compact id=%s (channel=%s)",
+                    "[push] Could not resolve farm UUID for compact id=%s (channel=%s)",
                     farm_id_compact,
                     channel_id,
                 )
                 return
             farm_uuid: uuid.UUID = row[0]
+            logger.info("[push] Resolved farm UUID=%s for compact_id=%s", farm_uuid, farm_id_compact)
 
+        logger.info(
+            "[push] Calling notify_chat_message: farm=%s context=%s sender=%s",
+            farm_uuid,
+            channel_context,
+            sender_id,
+        )
         await notify_chat_message(
             farm_id=farm_uuid,
             channel_context=channel_context,
@@ -362,9 +380,10 @@ async def _fire_chat_push(
             message_text=message_text,
             channel_id=channel_id,
         )
+        logger.info("[push] notify_chat_message completed for farm=%s channel=%s", farm_uuid, channel_id)
     except Exception as exc:
         logger.exception(
-            "Push: _fire_chat_push failed for channel=%s: %s",
+            "[push] _fire_chat_push failed for channel=%s: %s",
             channel_id,
             exc,
         )

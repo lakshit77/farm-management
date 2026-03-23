@@ -348,6 +348,14 @@ async def notify_chat_message(
 
     payload = _build_payload(title=title, body=body, url=url, tag=tag, urgent=False)
 
+    logger.info(
+        "[push] notify_chat_message: farm=%s context=%s preference_key=%s exclude_sender=%s",
+        farm_id,
+        channel_context,
+        preference_key,
+        sender_id,
+    )
+
     async with AsyncSessionLocal() as session:
         try:
             await send_push_to_farm(
@@ -358,6 +366,7 @@ async def notify_chat_message(
                 exclude_user_id=sender_id,
             )
             await session.commit()
+            logger.info("[push] notify_chat_message committed for farm=%s", farm_id)
         except Exception as exc:
             logger.exception(
                 "notify_chat_message failed for farm=%s channel=%s: %s",
