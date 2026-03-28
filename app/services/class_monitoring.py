@@ -30,7 +30,10 @@ from app.models.entry import (
     get_active_entries_for_farm_on_date,
 )
 from app.models.farm import Farm
-from app.services.horse_availability import run_flow_3_horse_availability
+from app.services.horse_availability import (
+    _parse_estimated_start_naive,
+    run_flow_3_horse_availability,
+)
 from app.services.notification_log import log_notification
 from app.services.schedule import ensure_farm_and_token, resolve_sync_date
 from app.services.wellington_client import WellingtonAPIError, get_class
@@ -39,6 +42,9 @@ logger = logging.getLogger(__name__)
 
 # Placeholder: 100000 = unplaced (per API docs)
 UNPLACED_PLACING = 100000
+
+# TIME_CHANGE: only notification_log + push when |Δ| >= this (minutes).
+TIME_CHANGE_ALERT_MIN_DELTA_MINUTES = 10.0
 
 
 # -----------------------------------------------------------------------------
@@ -189,6 +195,44 @@ def _time_to_datetime_str(
         tzinfo=timezone.utc,
     )
     return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _time_change_abs_delta_minutes(
+    old_estimated: Optional[str],
+    new_estimated: Optional[str],
+    scheduled_date: Optional[date],
+) -> Optional[float]:
+    """
+    Compute the absolute difference between two estimated-start strings in minutes.
+
+    Both values use the same parsing rules as schedule storage (full datetime or
+    time-of-day with ``scheduled_date``). Used to suppress minor TIME_CHANGE noise.
+
+    Args:
+        old_estimated: Previous value from the entry (may be full datetime or time-only).
+        new_estimated: New value from the API (normalized or raw).
+        scheduled_date: Show date for combining time-only strings.
+
+    Returns:
+        Non-negative minutes when both sides parse successfully; ``None`` if the
+        delta cannot be computed (caller should treat as significant and still alert).
+    """
+    if not new_estimated or not isinstance(new_estimated, str):
+        return None
+    new_s = new_estimated.strip()
+    if not new_s:
+        return None
+
+    old_s = (old_estimated.strip() if isinstance(old_estimated, str) else "") or None
+    if not old_s:
+        return None
+
+    dt_old = _parse_estimated_start_naive(old_s, scheduled_date)
+    dt_new = _parse_estimated_start_naive(new_s, scheduled_date)
+    if dt_old is None or dt_new is None:
+        return None
+
+    return abs((dt_new - dt_old).total_seconds() / 60.0)
 
 
 def _normalize_time_for_comparison(s: Optional[str]) -> Optional[str]:
@@ -468,28 +512,39 @@ async def _process_one_class_with_data(
     norm_old_time = _normalize_time_for_comparison(first.estimated_start)
     norm_new_time = _normalize_time_for_comparison(normalized_estimated or api_estimated)
     if (normalized_estimated or api_estimated) is not None and norm_old_time != norm_new_time:
-        ch = {
-            "type": NotificationType.TIME_CHANGE.value,
-            "old": first.estimated_start or "—",
-            "new": normalized_estimated or api_estimated,
-            "class_name": class_name,
-        }
-        changes.append(ch)
-        time_msg = _format_alert_time_change(ch, ring_name)
-        alerts.append({
-            "type": NotificationType.TIME_CHANGE.value,
-            "message": time_msg,
-        })
-        if farm_id is not None:
-            await log_notification(
-                session,
-                farm_id=farm_id,
-                source=NotificationSource.CLASS_MONITORING.value,
-                notification_type=NotificationType.TIME_CHANGE.value,
-                message=time_msg,
-                payload=ch,
-                entry_id=first.id,
-            )
+        new_est = normalized_estimated or api_estimated
+        delta_min = _time_change_abs_delta_minutes(
+            first.estimated_start,
+            new_est,
+            scheduled_date,
+        )
+        # Minor retimes (<10 min): still persist on the entry below, but no log/push/API alert.
+        significant_time_change = (
+            delta_min is None or delta_min >= TIME_CHANGE_ALERT_MIN_DELTA_MINUTES
+        )
+        if significant_time_change:
+            ch = {
+                "type": NotificationType.TIME_CHANGE.value,
+                "old": first.estimated_start or "—",
+                "new": new_est,
+                "class_name": class_name,
+            }
+            changes.append(ch)
+            time_msg = _format_alert_time_change(ch, ring_name)
+            alerts.append({
+                "type": NotificationType.TIME_CHANGE.value,
+                "message": time_msg,
+            })
+            if farm_id is not None:
+                await log_notification(
+                    session,
+                    farm_id=farm_id,
+                    source=NotificationSource.CLASS_MONITORING.value,
+                    notification_type=NotificationType.TIME_CHANGE.value,
+                    message=time_msg,
+                    payload=ch,
+                    entry_id=first.id,
+                )
 
     if api_completed_trips is not None and api_completed_trips != first.completed_trips:
         ch = {

@@ -22,3 +22,6 @@ pywebpush>=2.0.0
 
 # JWT decoding for push subscription auth (extract user_id from Supabase Bearer JWT)
 PyJWT>=2.0.0
+
+# Excel export (used fields sheet)
+openpyxl>=3.1.0
