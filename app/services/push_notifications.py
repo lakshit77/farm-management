@@ -281,9 +281,10 @@ async def send_push_to_farm(
         if pref_value:
             eligible.append(prefs.user_id)
 
-    if not eligible:
-        # Fall back: if no preference rows exist yet, send to all farm subscribers
-        # (this handles the case where users haven't visited preferences page yet)
+    if not eligible and not all_prefs:
+        # Fall back only when no preference rows exist yet; this handles users
+        # who haven't visited the preferences page. If rows exist but no users
+        # are eligible, treat that as an explicit opt-out and send nothing.
         subs_result = await session.execute(
             select(PushSubscription).where(
                 PushSubscription.farm_id == farm_id,
@@ -295,6 +296,14 @@ async def send_push_to_farm(
         if not subscriptions:
             return
         await asyncio.gather(*[_send_one(session, sub, payload) for sub in subscriptions])
+        return
+
+    if not eligible:
+        logger.info(
+            "No eligible users for push preference_key=%s farm_id=%s; skipping send.",
+            preference_key,
+            farm_id,
+        )
         return
 
     await send_push_to_users(
