@@ -110,7 +110,6 @@ def _build_payload(
     body: str,
     url: str = "/",
     tag: Optional[str] = None,
-    urgent: bool = False,
 ) -> str:
     """Build the JSON string sent as the push message body.
 
@@ -119,7 +118,6 @@ def _build_payload(
         body: Notification body text.
         url: Deep-link URL to open when the user taps the notification.
         tag: Optional grouping tag (same tag replaces previous notification).
-        urgent: If True, requireInteraction is set in the service worker.
 
     Returns:
         JSON-encoded string suitable for the push payload.
@@ -128,7 +126,6 @@ def _build_payload(
         "title": title,
         "body": body,
         "url": url,
-        "urgent": urgent,
     }
     if tag:
         data["tag"] = tag
@@ -380,7 +377,7 @@ async def notify_chat_message(
     url = f"/?tab=chat&channel={channel_context}"
     tag = f"chat-{channel_context}"
 
-    payload = _build_payload(title=title, body=body, url=url, tag=tag, urgent=False)
+    payload = _build_payload(title=title, body=body, url=url, tag=tag)
 
     logger.info(
         "[push] notify_chat_message: farm=%s context=%s preference_key=%s exclude_sender=%s",
@@ -418,47 +415,41 @@ async def notify_chat_message(
 # ── High-level: notify for class monitoring changes ───────────────────────────
 
 
-# Maps NotificationType to (title_template, body_template, url, urgent, preference_key, who)
+# Maps NotificationType to routing and preference metadata.
 # "who" is "all" or "horse_users_and_admins" or "horse_users"
 _MONITORING_NOTIFICATION_MAP: Dict[str, Dict[str, Any]] = {
     NotificationType.STATUS_CHANGE.value: {
         "preference_key": "class_status",
-        "urgent": False,
         "url": "/?tab=classes",
         "tag_prefix": "status",
         "who": "all",
     },
     NotificationType.TIME_CHANGE.value: {
         "preference_key": "time_changes",
-        "urgent": False,
         "url": "/?tab=classes",
         "tag_prefix": "time",
         "who": "all",
     },
     NotificationType.PROGRESS_UPDATE.value: {
         "preference_key": "progress_updates",
-        "urgent": False,
         "url": "/?tab=classes",
         "tag_prefix": "progress",
         "who": "all",
     },
     NotificationType.RESULT.value: {
         "preference_key": "results",
-        "urgent": True,
         "url": "/?tab=classes",
         "tag_prefix": "result",
         "who": "all",
     },
     NotificationType.HORSE_COMPLETED.value: {
         "preference_key": "horse_completed",
-        "urgent": True,
         "url": "/?tab=overview",
         "tag_prefix": "horse_completed",
         "who": "all",
     },
     NotificationType.SCRATCHED.value: {
         "preference_key": "scratched",
-        "urgent": True,
         "url": "/?tab=classes",
         "tag_prefix": "scratched",
         "who": "all",
@@ -466,14 +457,14 @@ _MONITORING_NOTIFICATION_MAP: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _build_monitoring_notification(change: Dict[str, Any]) -> Optional[tuple[str, str, str, bool, str]]:
-    """Build (title, body, url, urgent, preference_key) from a structured change dict.
+def _build_monitoring_notification(change: Dict[str, Any]) -> Optional[tuple[str, str, str, str]]:
+    """Build (title, body, url, preference_key) from a structured change dict.
 
     Args:
         change: Structured change dict from class_monitoring (has 'type' key).
 
     Returns:
-        Tuple of (title, body, url, urgent, preference_key) or None if unknown type.
+        Tuple of (title, body, url, preference_key) or None if unknown type.
     """
     change_type = change.get("type", "")
     cfg = _MONITORING_NOTIFICATION_MAP.get(change_type)
@@ -532,7 +523,6 @@ def _build_monitoring_notification(change: Dict[str, Any]) -> Optional[tuple[str
         title,
         body,
         cfg["url"],
-        cfg["urgent"],
         cfg["preference_key"],
     )
 
@@ -540,6 +530,7 @@ def _build_monitoring_notification(change: Dict[str, Any]) -> Optional[tuple[str
 async def notify_monitoring_changes(
     farm_id: uuid.UUID,
     changes: List[Dict[str, Any]],
+    restrict_to_user_ids: Optional[Sequence[str]] = None,
 ) -> None:
     """Send push notifications for all changes detected in a class monitoring run.
 
@@ -549,6 +540,9 @@ async def notify_monitoring_changes(
     Args:
         farm_id: Farm UUID.
         changes: List of structured change dicts from _process_one_class_with_data.
+        restrict_to_user_ids: If set, only these Supabase user IDs may receive pushes
+            (must still have an active subscription on the farm and the category enabled).
+            Production callers omit this to notify all eligible farm subscribers.
     """
     if not changes:
         return
@@ -560,7 +554,7 @@ async def notify_monitoring_changes(
                 if result is None:
                     continue
 
-                title, body, url, urgent, preference_key = result
+                title, body, url, preference_key = result
                 change_type = change.get("type", "unknown")
                 tag = f"{change_type.lower()}-{change.get('class_name', '')}"
 
@@ -569,7 +563,6 @@ async def notify_monitoring_changes(
                     body=body,
                     url=url,
                     tag=tag,
-                    urgent=urgent,
                 )
 
                 await send_push_to_farm(
@@ -577,6 +570,7 @@ async def notify_monitoring_changes(
                     farm_id=farm_id,
                     payload=payload,
                     preference_key=preference_key,
+                    restrict_to_user_ids=restrict_to_user_ids,
                 )
 
             await session.commit()
@@ -596,6 +590,7 @@ async def notify_morning_summary(
     class_count: int,
     horse_count: int,
     first_class_time: Optional[str] = None,
+    restrict_to_user_ids: Optional[Sequence[str]] = None,
 ) -> None:
     """Send a morning summary push notification after the daily sync completes.
 
@@ -606,6 +601,8 @@ async def notify_morning_summary(
         class_count: Total number of classes scheduled today.
         horse_count: Total number of horses entered today.
         first_class_time: Optional time string for the first class (e.g. "08:30").
+        restrict_to_user_ids: If set, only these user IDs may receive the push
+            (same semantics as :func:`send_push_to_farm`). Omitted in production.
     """
     if class_count == 0 and horse_count == 0:
         logger.debug(
@@ -623,7 +620,6 @@ async def notify_morning_summary(
         body=body,
         url="/?tab=overview",
         tag="morning-summary",
-        urgent=False,
     )
 
     async with AsyncSessionLocal() as session:
@@ -633,6 +629,7 @@ async def notify_morning_summary(
                 farm_id=farm_id,
                 payload=payload,
                 preference_key="morning_summary",
+                restrict_to_user_ids=restrict_to_user_ids,
             )
             await session.commit()
         except Exception as exc:

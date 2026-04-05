@@ -337,7 +337,6 @@ async def test_push(
         body="Push notifications are working correctly.",
         url="/",
         tag="test",
-        urgent=False,
     )
 
     sent = 0
