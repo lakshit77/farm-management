@@ -170,6 +170,33 @@ class SubscribeResponse(BaseModel):
     subscription_id: str = Field(description="UUID of the stored push subscription row.")
 
 
+class SubscriptionStatusRequest(BaseModel):
+    """Identify this device's push subscription for a status lookup.
+
+    The endpoint URL can be very long, so this uses POST with a JSON body instead of GET query params.
+    """
+
+    farm_id: str = Field(..., description="Farm UUID for the subscription row.")
+    endpoint: Optional[str] = Field(
+        default=None,
+        description=(
+            "Push endpoint from pushManager.getSubscription().toJSON().endpoint. "
+            "Omit or null when the browser has no subscription."
+        ),
+    )
+
+
+class SubscriptionStatusResponse(BaseModel):
+    """Whether this user+farm+endpoint has an active push row in the database."""
+
+    is_active: bool = Field(
+        description="True when a row exists for this endpoint and is_active is true.",
+    )
+    registered: bool = Field(
+        description="True when any row exists for this user, farm, and endpoint (even if inactive).",
+    )
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 
@@ -307,6 +334,70 @@ async def unsubscribe(
 
     logger.info("Push subscription deactivated for user=%s", user_id)
     return success_response()
+
+
+@router.post(
+    "/subscription/status",
+    response_model=ApiResponse[SubscriptionStatusResponse],
+    summary="Push subscription status for this device",
+    description=(
+        "Returns whether the given push endpoint is registered and active for the authenticated "
+        "user and farm. Send the endpoint from the browser's current PushSubscription, or omit it "
+        "when there is no subscription. "
+        "**Authentication:** `Authorization: Bearer <Supabase JWT>` required."
+    ),
+)
+async def subscription_status(
+    body: SubscriptionStatusRequest,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+) -> ApiResponse[SubscriptionStatusResponse]:
+    """Look up push_subscriptions for this JWT user, farm, and browser endpoint.
+
+    Args:
+        body: Farm id and optional push endpoint URL.
+        authorization: Supabase Bearer JWT.
+
+    Returns:
+        ApiResponse with ``is_active`` and ``registered`` flags for the device.
+
+    Raises:
+        HTTPException 400: If ``farm_id`` is not a valid UUID.
+        HTTPException 401: If the Authorization header is missing or invalid.
+    """
+    user_id = _extract_user_id(authorization)
+
+    try:
+        farm_uuid = uuid.UUID(body.farm_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid farm_id UUID.")
+
+    endpoint = (body.endpoint or "").strip()
+    if not endpoint:
+        return success_response(
+            data=SubscriptionStatusResponse(is_active=False, registered=False)
+        )
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(PushSubscription).where(
+                PushSubscription.user_id == user_id,
+                PushSubscription.farm_id == farm_uuid,
+                PushSubscription.endpoint == endpoint,
+            )
+        )
+        sub = result.scalar_one_or_none()
+
+    if sub is None:
+        return success_response(
+            data=SubscriptionStatusResponse(is_active=False, registered=False)
+        )
+
+    return success_response(
+        data=SubscriptionStatusResponse(
+            is_active=bool(sub.is_active),
+            registered=True,
+        )
+    )
 
 
 @router.post(
