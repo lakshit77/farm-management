@@ -381,10 +381,11 @@ async def get_active_entries_for_farm_on_date(
                 Show.farm_id == farm_id,
                 Entry.scheduled_date == scheduled_date,
                 Entry.api_class_id.isnot(None),
-                or_(
-                    Entry.class_status.is_(None),
-                    Entry.class_status != ClassStatus.COMPLETED.value,
-                ),
+                # or_(
+                #     Entry.class_status.is_(None),
+                #     # Entry.class_status != ClassStatus.COMPLETED.value,
+                # ),
+                # NOTE: Commenting above line so that information which come after completed classes are also included in the monitoring
             )
         )
         .options(

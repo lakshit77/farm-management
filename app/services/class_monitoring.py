@@ -685,7 +685,8 @@ async def _process_one_class_with_data(
         entry.status = _entry_status(scratch_trip, gone_in)
         entry.updated_at = datetime.now(timezone.utc)
         session.add(entry)
-        updated += 1
+        if changes and alerts:
+            updated += 1
 
     return updated, changes, alerts
 
