@@ -253,6 +253,14 @@ async def send_push_to_farm(
 ) -> None:
     """Send a push to farm users who have a given preference enabled.
 
+    Subscribers are taken from active push subscriptions for ``farm_id``.
+    Preferences are loaded by ``user_id`` (same as the preferences API), so a
+    mismatch between ``user_notification_preferences.farm_id`` and this farm
+    does not cause category toggles to be ignored.
+
+    Users with no preference row yet default to enabled for that category
+    (opt-in until they open notification settings).
+
     Args:
         session: Async DB session.
         farm_id: The farm UUID.
@@ -263,40 +271,53 @@ async def send_push_to_farm(
         restrict_to_user_ids: If provided, only send to these user IDs (subset of farm).
         exclude_user_id: Skip this user (e.g. message sender).
     """
-    prefs_result = await session.execute(
-        select(UserNotificationPreferences).where(
-            UserNotificationPreferences.farm_id == farm_id,
+    ex = exclude_user_id or ""
+    subs_result = await session.execute(
+        select(PushSubscription).where(
+            PushSubscription.farm_id == farm_id,
+            PushSubscription.is_active.is_(True),
+            PushSubscription.user_id != ex,
         )
     )
-    all_prefs = list(prefs_result.scalars().all())
+    farm_subs = list(subs_result.scalars().all())
+    restrict_set: Optional[set[str]] = (
+        set(restrict_to_user_ids) if restrict_to_user_ids is not None else None
+    )
 
-    # Build set of user_ids who have this preference enabled
-    eligible: List[str] = []
-    for prefs in all_prefs:
-        if restrict_to_user_ids and prefs.user_id not in restrict_to_user_ids:
+    subscriber_ids: List[str] = []
+    seen: set[str] = set()
+    for sub in farm_subs:
+        uid = sub.user_id
+        if uid in seen:
             continue
-        if prefs.user_id == exclude_user_id:
+        if restrict_set is not None and uid not in restrict_set:
             continue
-        pref_value = getattr(prefs, preference_key, True)
-        if pref_value:
-            eligible.append(prefs.user_id)
+        seen.add(uid)
+        subscriber_ids.append(uid)
 
-    if not eligible and not all_prefs:
-        # Fall back only when no preference rows exist yet; this handles users
-        # who haven't visited the preferences page. If rows exist but no users
-        # are eligible, treat that as an explicit opt-out and send nothing.
-        subs_result = await session.execute(
-            select(PushSubscription).where(
-                PushSubscription.farm_id == farm_id,
-                PushSubscription.is_active.is_(True),
-                PushSubscription.user_id != (exclude_user_id or ""),
-            )
+    if not subscriber_ids:
+        logger.debug(
+            "send_push_to_farm: no subscribers for farm_id=%s (after filters)",
+            farm_id,
         )
-        subscriptions = list(subs_result.scalars().all())
-        if not subscriptions:
-            return
-        await asyncio.gather(*[_send_one(session, sub, payload) for sub in subscriptions])
         return
+
+    prefs_result = await session.execute(
+        select(UserNotificationPreferences).where(
+            UserNotificationPreferences.user_id.in_(subscriber_ids),
+        )
+    )
+    prefs_by_user = {p.user_id: p for p in prefs_result.scalars().all()}
+
+    eligible: List[str] = []
+    for uid in subscriber_ids:
+        row = prefs_by_user.get(uid)
+        if row is None:
+            pref_value = True
+        else:
+            pref_value = bool(getattr(row, preference_key, True))
+        if pref_value:
+            eligible.append(uid)
 
     if not eligible:
         logger.info(
@@ -578,12 +599,21 @@ async def notify_morning_summary(
 ) -> None:
     """Send a morning summary push notification after the daily sync completes.
 
+    If both ``class_count`` and ``horse_count`` are zero, no push is sent.
+
     Args:
         farm_id: Farm UUID.
         class_count: Total number of classes scheduled today.
         horse_count: Total number of horses entered today.
         first_class_time: Optional time string for the first class (e.g. "08:30").
     """
+    if class_count == 0 and horse_count == 0:
+        logger.debug(
+            "Skipping morning summary push for farm=%s (no classes, no horses)",
+            farm_id,
+        )
+        return
+
     body = f"{class_count} classes today, {horse_count} horses entered."
     if first_class_time:
         body += f" First class at {first_class_time}."
