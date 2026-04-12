@@ -84,6 +84,17 @@ class Entry(Base):
     scratch_trip: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     gone_in: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # All-show entries support
+    is_own_entry: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False,
+    )
+    is_selected: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False,
+    )
+    rider_list_text: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    trainer_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    owner_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
     # Class-level data (duplicated per entry)
     estimated_start: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     actual_start: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
@@ -209,6 +220,8 @@ async def bulk_upsert_entries(
             set_={
                 "rider_id": stmt.excluded.rider_id,
                 "estimated_start": stmt.excluded.estimated_start,
+                "is_own_entry": stmt.excluded.is_own_entry,
+                "is_selected": stmt.excluded.is_selected,
                 "updated_at": datetime.now(timezone.utc),
             },
         )
@@ -236,6 +249,8 @@ async def bulk_upsert_entries(
                 "rider_id": stmt_no.excluded.rider_id,
                 "status": stmt_no.excluded.status,
                 "scheduled_date": stmt_no.excluded.scheduled_date,
+                "is_own_entry": stmt_no.excluded.is_own_entry,
+                "is_selected": stmt_no.excluded.is_selected,
                 "updated_at": datetime.now(timezone.utc),
             },
         )
@@ -381,6 +396,7 @@ async def get_active_entries_for_farm_on_date(
                 Show.farm_id == farm_id,
                 Entry.scheduled_date == scheduled_date,
                 Entry.api_class_id.isnot(None),
+                Entry.is_selected.is_(True),
                 # or_(
                 #     Entry.class_status.is_(None),
                 #     # Entry.class_status != ClassStatus.COMPLETED.value,
@@ -426,6 +442,7 @@ async def get_entries_for_farm_on_date(
             and_(
                 Show.farm_id == farm_id,
                 Entry.scheduled_date == scheduled_date,
+                Entry.is_selected.is_(True),
             )
         )
         .options(

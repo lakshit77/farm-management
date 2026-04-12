@@ -131,6 +131,90 @@ async def get_entries_my(
         return resp.json()
 
 
+async def get_all_entries(
+    show_id: int,
+    customer_id: str,
+    token: Optional[str] = None,
+    page: int = 1,
+) -> dict[str, Any]:
+    """
+    GET /entries?sort_on=number&sort_type=asc&page={page}&show_id={show_id}&customer_id={customer_id}.
+    Returns dict with 'entries' list, 'total_entries', 'records_per_page', 'page', 'show_name'.
+    Used by the all-show-entries sync (once daily). If token is not provided, logs in to obtain one.
+    """
+    if token is None:
+        token = await get_access_token()
+    s = get_settings()
+    base = s.WELLINGTON_API_BASE_URL.rstrip("/")
+    url = f"{base}/entries"
+    params: Dict[str, Any] = {
+        "sort_on": "number",
+        "sort_type": "asc",
+        "page": page,
+        "show_id": show_id,
+        "customer_id": customer_id,
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            url,
+            params=params,
+            headers=_default_headers(token),
+        )
+        if resp.status_code != 200:
+            raise WellingtonAPIError(
+                f"Get all entries failed: {resp.status_code}",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return resp.json()
+
+
+async def get_all_entries_all_pages(
+    show_id: int,
+    customer_id: str,
+    token: Optional[str] = None,
+    batch_size: int = 10,
+) -> tuple[list[dict], int]:
+    """
+    Fetch ALL pages from GET /entries and return the combined entry list.
+
+    Fetches page 1 to discover total_entries / records_per_page, then fetches
+    remaining pages in parallel batches of ``batch_size``.
+
+    Returns (all_entry_dicts, total_count).
+    """
+    import asyncio  # noqa: PLC0415
+    import math  # noqa: PLC0415
+
+    if token is None:
+        token = await get_access_token()
+
+    first_page = await get_all_entries(show_id, customer_id, token=token, page=1)
+    all_entries: list[dict] = list(first_page.get("entries") or [])
+    total = first_page.get("total_entries") or 0
+    per_page = first_page.get("records_per_page") or 10
+    total_pages = math.ceil(total / per_page) if per_page > 0 else 1
+
+    if total_pages <= 1:
+        return all_entries, total
+
+    remaining_pages = list(range(2, total_pages + 1))
+    for i in range(0, len(remaining_pages), batch_size):
+        batch = remaining_pages[i : i + batch_size]
+        tasks = [
+            get_all_entries(show_id, customer_id, token=token, page=p)
+            for p in batch
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning("get_all_entries page failed: %s", r)
+                continue
+            all_entries.extend(r.get("entries") or [])
+
+    return all_entries, total
+
+
 async def get_class(
     class_id: int,
     show_id: int,

@@ -651,6 +651,8 @@ def build_entry_rows_and_collect_entities(
                 "estimated_start": estimated_start,
                 "status": row_status,
                 "class_status": None,
+                "is_own_entry": True,
+                "is_selected": True,
                 "_horse_name": horse_name,
                 "_rider_name": rn or default_rider,
             })
@@ -673,6 +675,8 @@ def build_entry_rows_and_collect_entities(
                 "estimated_start": None,
                 "status": EntryStatus.INACTIVE.value,
                 "class_status": None,
+                "is_own_entry": True,
+                "is_selected": True,
                 "_horse_name": horse_name,
                 "_rider_name": default_rider,
             })
