@@ -62,8 +62,9 @@ async def bulk_upsert_events(
             for name, rn in rows
         ]
     )
-    stmt = stmt.on_conflict_do_nothing(
-        index_elements=["farm_id", "name"]
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["farm_id", "name"],
+        set_={"ring_number": insert(Event.__table__).excluded.ring_number},
     ).returning(Event.id)
     result = await session.execute(stmt)
     inserted = len(result.all())

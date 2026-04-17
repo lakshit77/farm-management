@@ -183,11 +183,16 @@ async def get_schedule_view(
             )
         # Sort classes by class_number or name
         classes_out.sort(key=lambda c: (c.class_number or "", c.name))
+        event_entries = [e for cid_entries in classes_dict.values() for e in cid_entries]
+        entry_ring_number = next(
+            (e.ring_number for e in event_entries if e.ring_number is not None),
+            event.ring_number,
+        )
         events_out.append(
             EventView(
                 id=eid,
                 name=event.name,
-                ring_number=event.ring_number,
+                ring_number=entry_ring_number,
                 classes=classes_out,
             )
         )

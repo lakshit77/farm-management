@@ -71,6 +71,7 @@ class Entry(Base):
     api_rider_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     api_class_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     api_ring_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ring_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     api_trip_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     api_trainer_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
@@ -219,9 +220,11 @@ async def bulk_upsert_entries(
             index_where=text("api_class_id IS NOT NULL"),
             set_={
                 "rider_id": stmt.excluded.rider_id,
+                "event_id": stmt.excluded.event_id,
                 "estimated_start": stmt.excluded.estimated_start,
                 "is_own_entry": stmt.excluded.is_own_entry,
                 "is_selected": stmt.excluded.is_selected,
+                "ring_number": stmt.excluded.ring_number,
                 "updated_at": datetime.now(timezone.utc),
             },
         )
