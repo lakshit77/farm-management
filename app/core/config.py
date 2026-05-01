@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     WELLINGTON_FARM_NAME: str = ""
     WELLINGTON_USERNAME: str = ""
     WELLINGTON_PASSWORD: str = ""
+    WELLINGTON_TOKEN_FALLBACK_URL: str = ""
 
     # API key for n8n / external callers (Bearer token). If empty, key check is skipped.
     API_SECRET_KEY: str = ""

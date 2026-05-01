@@ -38,6 +38,7 @@ async def get_access_token() -> str:
     """
     POST /auth/login and return access_token.
     Uses WELLINGTON_USERNAME, WELLINGTON_PASSWORD, WELLINGTON_CUSTOMER_ID from settings.
+    Falls back to WELLINGTON_TOKEN_FALLBACK_URL if direct login doesn't return a token.
     """
     s = get_settings()
     base = s.WELLINGTON_API_BASE_URL.rstrip("/")
@@ -54,18 +55,31 @@ async def get_access_token() -> str:
             json=payload,
             headers=_default_headers(),
         )
-        # API may return 200 OK or 201 Created on success
-        if resp.status_code not in (200, 201):
+        if resp.status_code in (200, 201):
+            token = resp.json().get("access_token")
+            if token:
+                return token
+
+        # Direct login failed or returned no token — try fallback
+        fallback_url = s.WELLINGTON_TOKEN_FALLBACK_URL.strip()
+        if fallback_url:
+            logger.warning("Wellington direct login did not return access_token, trying fallback URL")
+            fallback_resp = await client.get(fallback_url, timeout=30.0)
+            if fallback_resp.status_code == 200:
+                token = fallback_resp.json().get("access_token")
+                if token:
+                    return token
             raise WellingtonAPIError(
-                f"Login failed: {resp.status_code}",
-                status_code=resp.status_code,
-                body=resp.text,
+                f"Fallback login failed: {fallback_resp.status_code}",
+                status_code=fallback_resp.status_code,
+                body=fallback_resp.text,
             )
-        data = resp.json()
-        token = data.get("access_token")
-        if not token:
-            raise WellingtonAPIError("Login response missing access_token", body=data)
-        return token
+
+        raise WellingtonAPIError(
+            "Login response missing access_token and no fallback configured",
+            status_code=resp.status_code,
+            body=resp.text,
+        )
 
 
 async def get_schedule(
